@@ -6,9 +6,11 @@ import os
 try:
     from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                  QHBoxLayout, QPushButton, QLabel, QFileDialog, 
-                                 QSpinBox, QScrollArea, QGridLayout, QFrame)
+                                 QSpinBox, QScrollArea, QGridLayout, QFrame,
+                                 QListWidget, QListWidgetItem, QAbstractItemView)
     from PyQt5.QtGui import QPixmap, QImage
-    from PyQt5.QtCore import Qt
+    from PyQt5.QtCore import Qt, QSize
+    import math
 except ImportError:
     print("PyQt5 is required. Please install it with: pip install PyQt5")
     sys.exit(1)
@@ -31,7 +33,7 @@ from PIL import Image, ImageQt, ImageChops
 
 # ... (imports remain the same, just adding ImageChops if not present, but better to add it at top level if possible, or inside function)
 
-def generate_palette_layers(palette_image):
+def generate_palette_layers(palette_image, custom_order=None):
     """
     Prend une image en mode palette et génère les couches et masques pour chaque couleur.
     Utilise un masque cumulatif : 
@@ -50,7 +52,20 @@ def generate_palette_layers(palette_image):
         return []
 
     # Trier par index de couleur pour un affichage cohérent
-    used_colors.sort(key=lambda x: x[1])
+    # Si un ordre personnalisé est fourni, l'utiliser
+    if custom_order:
+        # Créer un mapping index -> position
+        order_map = {idx: i for i, idx in enumerate(custom_order)}
+        # Fonction de tri: si dans custom_order, utiliser sa position, sinon mettre à la fin trié par index
+        def sort_key(item):
+            idx = item[1]
+            if idx in order_map:
+                return (0, order_map[idx])
+            else:
+                return (1, idx)
+        used_colors.sort(key=sort_key)
+    else:
+        used_colors.sort(key=lambda x: x[1])
 
     layers_data = []
     
@@ -107,7 +122,7 @@ def save_layers_to_disk(layers_data, output_dir="sub_images"):
         layer.save(filepath)
         print(f"Sauvegardé: {filepath}")
 
-def save_to_obj(layers_data, output_path, z_scale=1.0):
+def save_to_obj(layers_data, output_path, z_scale=1.0, xy_scale=1.0):
     """
     Exports layers to an OBJ file with an associated MTL file for colors.
     Each layer is a separate object (o layer_n).
@@ -174,14 +189,25 @@ def save_to_obj(layers_data, output_path, z_scale=1.0):
                         # 6: x+1, y+1, z+1
                         # 7: x, y+1, z+1
                         
-                        obj_file.write(f"v {x} {y_pos} {z}\n")
-                        obj_file.write(f"v {x+1} {y_pos} {z}\n")
-                        obj_file.write(f"v {x+1} {y_pos+1} {z}\n")
-                        obj_file.write(f"v {x} {y_pos+1} {z}\n")
-                        obj_file.write(f"v {x} {y_pos} {z+zs}\n")
-                        obj_file.write(f"v {x+1} {y_pos} {z+zs}\n")
-                        obj_file.write(f"v {x+1} {y_pos+1} {z+zs}\n")
-                        obj_file.write(f"v {x} {y_pos+1} {z+zs}\n")
+                        # Apply XY scaling
+                        x0 = x * xy_scale
+                        x1 = (x + 1) * xy_scale
+                        y0 = y_pos * xy_scale
+                        y1 = (y_pos + 1) * xy_scale
+
+                        # Swap Y and Z for OBJ export (Y is up/thickness, Z is depth/image-y)
+                        # v x y z -> v x z y
+                        # z (stack) becomes y (height)
+                        # y (image) becomes z (depth)
+                        
+                        obj_file.write(f"v {x0} {z} {y0}\n")
+                        obj_file.write(f"v {x1} {z} {y0}\n")
+                        obj_file.write(f"v {x1} {z} {y1}\n")
+                        obj_file.write(f"v {x0} {z} {y1}\n")
+                        obj_file.write(f"v {x0} {z+zs} {y0}\n")
+                        obj_file.write(f"v {x1} {z+zs} {y0}\n")
+                        obj_file.write(f"v {x1} {z+zs} {y1}\n")
+                        obj_file.write(f"v {x0} {z+zs} {y1}\n")
                         
                         # Faces (1-based indices)
                         # Back: 0 1 2 3 (CCW from back)
@@ -253,15 +279,46 @@ class VoxelWidget(QOpenGLWidget):
                         QQuaternion.fromAxisAndAngle(QVector3D(0.0, 1.0, 0.0), -45.0)
         self.zoom = -50.0
         self.z_scale = 1.0
+        self.xy_scale = 1.0
         self.lastPos = None
 
     def set_layers(self, layers_data):
         self.layers_data = layers_data
-        if layers_data:
-            # Auto-zoom based on image size
-            width, height = layers_data[0]['layer'].size
-            max_dim = max(width, height)
-            self.zoom = -(max_dim / 0.414) * 1.2 # 1.2 for margin
+        self.update()
+
+    def recalculate_zoom(self):
+        if not self.layers_data:
+            return
+            
+        width, height = self.layers_data[0]['layer'].size
+        num_layers = len(self.layers_data)
+        
+        # Calculate world dimensions
+        # Calculate world dimensions
+        # Swapped Y and Z:
+        # Width (X) -> X
+        # Height (Y_img) -> Z_world
+        # Layers (Z_stack) -> Y_world
+        w_world = width * self.xy_scale
+        h_world = num_layers * self.z_scale # Height is now thickness
+        d_world = height * self.xy_scale    # Depth is now image height
+        
+        # Calculate bounding sphere diameter (approx) or max dimension
+        max_dim = max(w_world, h_world, d_world)
+        
+        # We want max_dim to occupy 80% of the view height
+        # tan(fov/2) = (height/2) / dist
+        # height_at_dist = 2 * dist * tan(22.5)
+        # We want max_dim = 0.8 * height_at_dist
+        # max_dim = 0.8 * 2 * dist * tan(22.5)
+        # dist = max_dim / (1.6 * tan(22.5))
+        
+        fov_rad = 45.0 * math.pi / 180.0
+        tan_half_fov = math.tan(fov_rad / 2.0)
+        
+        dist = max_dim / (1.6 * tan_half_fov)
+        
+        self.zoom = -dist
         self.update()
 
     def initializeGL(self):
@@ -290,10 +347,15 @@ class VoxelWidget(QOpenGLWidget):
 
         # Center the model
         width, height = self.layers_data[0]['layer'].size
-        glTranslatef(-width / 2.0, -height / 2.0, 0.0)
+        num_layers = len(self.layers_data)
         
-        # Apply Z-scaling
-        glScalef(1.0, 1.0, self.z_scale)
+        # Apply scaling FIRST
+        # Scale (X, Y, Z) -> (XY, Thickness, XY)
+        glScalef(self.xy_scale, self.z_scale, self.xy_scale)
+        
+        # Then translate to center
+        # Center (X, Y, Z) -> (width/2, layers/2, height/2)
+        glTranslatef(-width / 2.0, -num_layers / 2.0, -height / 2.0)
 
         # Draw Solids
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
@@ -332,7 +394,11 @@ class VoxelWidget(QOpenGLWidget):
                         else:
                             glColor3ub(r, g, b)
                             
-                        self.draw_cube(x, height - 1 - y, i) # Use i as Z-offset
+                        # Draw cube at (x, layer, y_img)
+                        # x -> x
+                        # y (stack) -> i
+                        # z (depth) -> height - 1 - y
+                        self.draw_cube(x, i, height - 1 - y)
             glEnd()
 
     def draw_cube(self, x, y, z):
@@ -444,34 +510,61 @@ class MainWindow(QMainWindow):
 
         # Controls Area
         controls_layout = QHBoxLayout()
+        controls_layout.setSpacing(15) # Spacing between groups
         
         self.btn_load = QPushButton("Charger Image")
         self.btn_load.clicked.connect(self.load_image)
         controls_layout.addWidget(self.btn_load)
 
-        controls_layout.addWidget(QLabel("Nombre de couleurs:"))
+        def add_param(label, widget):
+            w = QWidget()
+            l = QHBoxLayout(w)
+            l.setContentsMargins(0,0,0,0)
+            l.setSpacing(2)
+            l.addWidget(QLabel(label))
+            l.addWidget(widget)
+            controls_layout.addWidget(w)
+
         self.spin_colors = QSpinBox()
         self.spin_colors.setRange(2, 256)
         self.spin_colors.setValue(4) # Default to 4 as requested
-        controls_layout.addWidget(self.spin_colors)
+        add_param("Nb Couleurs:", self.spin_colors)
 
         from PyQt5.QtWidgets import QDoubleSpinBox
-        controls_layout.addWidget(QLabel("Epaisseur Pixel:"))
         self.spin_depth = QDoubleSpinBox()
         self.spin_depth.setRange(0.01, 5.0)
         self.spin_depth.setSingleStep(0.01)
         self.spin_depth.setValue(0.1) # Default to 0.1 fixed thickness
         self.spin_depth.valueChanged.connect(self.update_depth)
-        controls_layout.addWidget(self.spin_depth)
+        add_param("Epaisseur Couche:", self.spin_depth)
+
+        self.spin_scale_xy = QDoubleSpinBox()
+        self.spin_scale_xy.setRange(0.001, 100.0)
+        self.spin_scale_xy.setSingleStep(0.01)
+        self.spin_scale_xy.setDecimals(4)
+        self.spin_scale_xy.setValue(0.1)
+        self.spin_scale_xy.valueChanged.connect(self.update_from_scale_xy)
+        # add_param("Taille Pixel XY:", self.spin_scale_xy) # Hidden as requested
+
+        self.spin_width_cm = QDoubleSpinBox()
+        self.spin_width_cm.setRange(0.1, 1000.0)
+        self.spin_width_cm.setSingleStep(1.0)
+        self.spin_width_cm.setValue(10.0)
+        self.spin_width_cm.valueChanged.connect(self.update_from_width_cm)
+        add_param("Largeur (cm):", self.spin_width_cm)
+
+        self.spin_height_cm = QDoubleSpinBox()
+        self.spin_height_cm.setRange(0.1, 1000.0)
+        self.spin_height_cm.setSingleStep(1.0)
+        self.spin_height_cm.setValue(10.0)
+        self.spin_height_cm.valueChanged.connect(self.update_from_height_cm)
+        add_param("Hauteur (cm):", self.spin_height_cm)
 
         self.btn_process = QPushButton("Convertir & Extraire")
         self.btn_process.clicked.connect(self.process_image)
         controls_layout.addWidget(self.btn_process)
         
-        self.btn_save = QPushButton("Sauvegarder Layers")
-        self.btn_save.clicked.connect(self.save_layers)
-        self.btn_save.setEnabled(False)
-        controls_layout.addWidget(self.btn_save)
+
 
         self.btn_export_obj = QPushButton("Export Mesh")
         self.btn_export_obj.clicked.connect(self.export_obj)
@@ -496,17 +589,15 @@ class MainWindow(QMainWindow):
         from PyQt5.QtWidgets import QSplitter
         bottom_splitter = QSplitter(Qt.Horizontal)
         
-        # Left: Layers Scroll Area
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_content = QWidget()
-        self.layers_grid = QGridLayout(self.scroll_content)
-        self.scroll_area.setWidget(self.scroll_content)
+        # Left: Layers List (Drag & Drop)
+        self.layers_list = QListWidget()
+        self.layers_list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.layers_list.model().rowsMoved.connect(self.on_layers_reordered)
         
         layers_container = QWidget()
         layers_layout = QVBoxLayout(layers_container)
         layers_layout.addWidget(QLabel("Couches (Layers) et Masques:"))
-        layers_layout.addWidget(self.scroll_area)
+        layers_layout.addWidget(self.layers_list)
         
         bottom_splitter.addWidget(layers_container)
 
@@ -534,7 +625,7 @@ class MainWindow(QMainWindow):
             self.lbl_original.set_image(img)
             self.lbl_converted.clear()
             self.clear_layers_grid()
-            self.btn_save.setEnabled(False)
+
             self.btn_export_obj.setEnabled(False)
             self.voxel_widget.set_layers([])
 
@@ -548,75 +639,152 @@ class MainWindow(QMainWindow):
         if palette_img:
             self.lbl_converted.set_image(palette_img)
             
+            # Get current order if exists
+            custom_order = []
+            if self.layers_list.count() > 0:
+                for i in range(self.layers_list.count()):
+                    item = self.layers_list.item(i)
+                    data = item.data(Qt.UserRole)
+                    if data and 'index' in data:
+                        custom_order.append(data['index'])
+
             # Generate layers
-            self.processed_layers = generate_palette_layers(palette_img)
+            self.processed_layers = generate_palette_layers(palette_img, custom_order)
             self.display_layers()
             self.voxel_widget.set_layers(self.processed_layers)
             self.update_depth(self.spin_depth.value())
-            self.btn_save.setEnabled(True)
+            
+            # Initialize dimensions based on image size and default xy_scale
+            if self.processed_layers:
+                width, height = self.processed_layers[0]['layer'].size
+                # Default xy_scale is 0.1, so calculate cm
+                # 0.1 unit = 1 cm => 1 unit = 10 cm
+                # width_cm = width * xy_scale * 10
+                current_xy = self.spin_scale_xy.value()
+                w_cm = width * current_xy * 10.0
+                h_cm = height * current_xy * 10.0
+                
+                self.spin_width_cm.setValue(w_cm)
+                self.spin_height_cm.setValue(h_cm)
+                self.block_signals_dimensions(False)
+                
+                self.update_voxel_scale_xy()
+                self.voxel_widget.recalculate_zoom() # Auto-zoom after processing
+
             self.btn_export_obj.setEnabled(True)
+
+    def block_signals_dimensions(self, block):
+        self.spin_scale_xy.blockSignals(block)
+        self.spin_width_cm.blockSignals(block)
+        self.spin_height_cm.blockSignals(block)
 
     def update_depth(self, value):
         self.voxel_widget.z_scale = value
         self.voxel_widget.update()
 
-    def clear_layers_grid(self):
-        # Remove all widgets and reset layout
-        while self.layers_grid.count():
-            item = self.layers_grid.takeAt(0)
-            widget = item.widget()
-            if widget:
-                widget.deleteLater()
+    def update_voxel_scale_xy(self):
+        self.voxel_widget.xy_scale = self.spin_scale_xy.value()
+        self.voxel_widget.update()
+
+    def update_from_scale_xy(self, value):
+        if not self.processed_layers:
+            return
         
-        # Reset row stretches
-        for r in range(self.layers_grid.rowCount()):
-            self.layers_grid.setRowStretch(r, 0)
+        width, height = self.processed_layers[0]['layer'].size
+        w_cm = width * value * 10.0
+        h_cm = height * value * 10.0
+        
+        self.block_signals_dimensions(True)
+        self.spin_width_cm.setValue(w_cm)
+        self.spin_height_cm.setValue(h_cm)
+        self.block_signals_dimensions(False)
+        
+        self.update_voxel_scale_xy()
+
+    def update_from_width_cm(self, value):
+        if not self.processed_layers:
+            return
+            
+        width, height = self.processed_layers[0]['layer'].size
+        aspect_ratio = height / width
+        
+        new_h_cm = value * aspect_ratio
+        # xy_scale = width_cm / (width_px * 10)
+        new_scale = value / (width * 10.0)
+        
+        self.block_signals_dimensions(True)
+        self.spin_height_cm.setValue(new_h_cm)
+        self.spin_scale_xy.setValue(new_scale)
+        self.block_signals_dimensions(False)
+        
+        self.update_voxel_scale_xy()
+
+    def update_from_height_cm(self, value):
+        if not self.processed_layers:
+            return
+            
+        width, height = self.processed_layers[0]['layer'].size
+        aspect_ratio = width / height
+        
+        new_w_cm = value * aspect_ratio
+        # xy_scale = height_cm / (height_px * 10)
+        new_scale = value / (height * 10.0)
+        
+        self.block_signals_dimensions(True)
+        self.spin_width_cm.setValue(new_w_cm)
+        self.spin_scale_xy.setValue(new_scale)
+        self.block_signals_dimensions(False)
+        
+        self.update_voxel_scale_xy()
+
+    def on_layers_reordered(self, parent, start, end, destination, row):
+        # When layers are reordered, we want to regenerate everything (masks, 3D view)
+        # using the new order. The easiest way is to call process_image, 
+        # which reads the current list order.
+        self.process_image()
+
+    def clear_layers_grid(self):
+        self.layers_list.clear()
 
     def display_layers(self):
         self.clear_layers_grid()
         
-        # Headers
-        self.layers_grid.addWidget(QLabel("Index"), 0, 0)
-        self.layers_grid.addWidget(QLabel("Couleur"), 0, 1)
-        self.layers_grid.addWidget(QLabel("Layer (RGBA)"), 0, 2)
-        self.layers_grid.addWidget(QLabel("Masque"), 0, 3)
-
         for i, item in enumerate(self.processed_layers):
-            row = i + 1
+            # Create a custom widget for the item
+            widget = QWidget()
+            layout = QHBoxLayout(widget)
+            layout.setContentsMargins(5, 2, 5, 2)
             
             # Index
-            self.layers_grid.addWidget(QLabel(str(item['index'])), row, 0)
+            layout.addWidget(QLabel(str(item['index'])))
             
             # Color Swatch
             r, g, b = item['color']
             swatch = QLabel()
-            swatch.setFixedSize(50, 50)
+            swatch.setFixedSize(30, 30)
             swatch.setStyleSheet(f"background-color: rgb({r},{g},{b}); border: 1px solid black;")
-            self.layers_grid.addWidget(swatch, row, 1)
+            layout.addWidget(swatch)
             
             # Layer Image
             layer_lbl = ImageLabel()
-            layer_lbl.setFixedSize(50, 50)
+            layer_lbl.setFixedSize(40, 40)
             layer_lbl.set_image(item['layer'])
-            self.layers_grid.addWidget(layer_lbl, row, 2)
+            layout.addWidget(layer_lbl)
             
             # Mask Image
             mask_lbl = ImageLabel()
-            mask_lbl.setFixedSize(50, 50)
+            mask_lbl.setFixedSize(40, 40)
             mask_lbl.set_image(item['mask'])
-            self.layers_grid.addWidget(mask_lbl, row, 3)
+            layout.addWidget(mask_lbl)
             
-            # Ensure this row doesn't stretch
-            self.layers_grid.setRowStretch(row, 0)
-
-        # Add a stretchable row at the bottom to push everything up
-        self.layers_grid.setRowStretch(len(self.processed_layers) + 1, 1)
-
-    def save_layers(self):
-        if self.processed_layers:
-            output_dir = QFileDialog.getExistingDirectory(self, "Choisir dossier de sauvegarde")
-            if output_dir:
-                save_layers_to_disk(self.processed_layers, output_dir)
+            layout.addStretch()
+            
+            # List Item
+            list_item = QListWidgetItem(self.layers_list)
+            list_item.setSizeHint(widget.sizeHint())
+            list_item.setData(Qt.UserRole, item)
+            
+            self.layers_list.setItemWidget(list_item, widget)
 
     def export_obj(self):
         if self.processed_layers:
@@ -627,7 +795,7 @@ class MainWindow(QMainWindow):
             
             path, _ = QFileDialog.getSaveFileName(self, "Exporter OBJ", os.path.join(default_dir, "output.obj"), "OBJ Files (*.obj)")
             if path:
-                save_to_obj(self.processed_layers, path, self.spin_depth.value())
+                save_to_obj(self.processed_layers, path, self.spin_depth.value(), self.spin_scale_xy.value())
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
