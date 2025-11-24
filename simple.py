@@ -107,7 +107,7 @@ def save_layers_to_disk(layers_data, output_dir="sub_images"):
         layer.save(filepath)
         print(f"Sauvegardé: {filepath}")
 
-def save_to_obj(layers_data, output_path):
+def save_to_obj(layers_data, output_path, z_scale=1.0):
     """
     Exports layers to an OBJ file with an associated MTL file for colors.
     Each layer is a separate object (o layer_n).
@@ -148,7 +148,10 @@ def save_to_obj(layers_data, output_path):
             obj_file.write(f"usemtl material_{index}\n")
             
             # Z-offset based on layer index (i)
-            z = float(i)
+            z = float(i) * z_scale
+            
+            # Scale factor for the cube depth
+            zs = z_scale
             
             for y in range(height):
                 for x in range(width):
@@ -175,10 +178,10 @@ def save_to_obj(layers_data, output_path):
                         obj_file.write(f"v {x+1} {y_pos} {z}\n")
                         obj_file.write(f"v {x+1} {y_pos+1} {z}\n")
                         obj_file.write(f"v {x} {y_pos+1} {z}\n")
-                        obj_file.write(f"v {x} {y_pos} {z+1}\n")
-                        obj_file.write(f"v {x+1} {y_pos} {z+1}\n")
-                        obj_file.write(f"v {x+1} {y_pos+1} {z+1}\n")
-                        obj_file.write(f"v {x} {y_pos+1} {z+1}\n")
+                        obj_file.write(f"v {x} {y_pos} {z+zs}\n")
+                        obj_file.write(f"v {x+1} {y_pos} {z+zs}\n")
+                        obj_file.write(f"v {x+1} {y_pos+1} {z+zs}\n")
+                        obj_file.write(f"v {x} {y_pos+1} {z+zs}\n")
                         
                         # Faces (1-based indices)
                         # Back: 0 1 2 3 (CCW from back)
@@ -249,6 +252,7 @@ class VoxelWidget(QOpenGLWidget):
         self.rotation = QQuaternion.fromAxisAndAngle(QVector3D(1.0, 0.0, 0.0), 30.0) * \
                         QQuaternion.fromAxisAndAngle(QVector3D(0.0, 1.0, 0.0), -45.0)
         self.zoom = -50.0
+        self.z_scale = 1.0
         self.lastPos = None
 
     def set_layers(self, layers_data):
@@ -287,6 +291,9 @@ class VoxelWidget(QOpenGLWidget):
         # Center the model
         width, height = self.layers_data[0]['layer'].size
         glTranslatef(-width / 2.0, -height / 2.0, 0.0)
+        
+        # Apply Z-scaling
+        glScalef(1.0, 1.0, self.z_scale)
 
         # Draw Solids
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
@@ -448,6 +455,15 @@ class MainWindow(QMainWindow):
         self.spin_colors.setValue(4) # Default to 4 as requested
         controls_layout.addWidget(self.spin_colors)
 
+        from PyQt5.QtWidgets import QDoubleSpinBox
+        controls_layout.addWidget(QLabel("Epaisseur Pixel:"))
+        self.spin_depth = QDoubleSpinBox()
+        self.spin_depth.setRange(0.01, 5.0)
+        self.spin_depth.setSingleStep(0.01)
+        self.spin_depth.setValue(0.1) # Default to 0.1 fixed thickness
+        self.spin_depth.valueChanged.connect(self.update_depth)
+        controls_layout.addWidget(self.spin_depth)
+
         self.btn_process = QPushButton("Convertir & Extraire")
         self.btn_process.clicked.connect(self.process_image)
         controls_layout.addWidget(self.btn_process)
@@ -536,8 +552,13 @@ class MainWindow(QMainWindow):
             self.processed_layers = generate_palette_layers(palette_img)
             self.display_layers()
             self.voxel_widget.set_layers(self.processed_layers)
+            self.update_depth(self.spin_depth.value())
             self.btn_save.setEnabled(True)
             self.btn_export_obj.setEnabled(True)
+
+    def update_depth(self, value):
+        self.voxel_widget.z_scale = value
+        self.voxel_widget.update()
 
     def clear_layers_grid(self):
         # Remove all widgets and reset layout
@@ -606,7 +627,7 @@ class MainWindow(QMainWindow):
             
             path, _ = QFileDialog.getSaveFileName(self, "Exporter OBJ", os.path.join(default_dir, "output.obj"), "OBJ Files (*.obj)")
             if path:
-                save_to_obj(self.processed_layers, path)
+                save_to_obj(self.processed_layers, path, self.spin_depth.value())
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
