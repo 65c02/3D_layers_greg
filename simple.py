@@ -151,6 +151,20 @@ def save_to_obj(layers_data, output_path, z_scale=1.0, xy_scale=1.0):
     with open(output_path, 'w') as obj_file:
         obj_file.write(f"mtllib {mtl_filename}\n")
         
+        # Write Normals
+        # 1: Front (0, 0, -1)
+        obj_file.write("vn 0.0 0.0 -1.0\n")
+        # 2: Back (0, 0, 1)
+        obj_file.write("vn 0.0 0.0 1.0\n")
+        # 3: Bottom (0, -1, 0)
+        obj_file.write("vn 0.0 -1.0 0.0\n")
+        # 4: Top (0, 1, 0)
+        obj_file.write("vn 0.0 1.0 0.0\n")
+        # 5: Left (-1, 0, 0)
+        obj_file.write("vn -1.0 0.0 0.0\n")
+        # 6: Right (1, 0, 0)
+        obj_file.write("vn 1.0 0.0 0.0\n")
+        
         vertex_offset = 1
         
         for i, item in enumerate(layers_data):
@@ -210,20 +224,32 @@ def save_to_obj(layers_data, output_path, z_scale=1.0, xy_scale=1.0):
                         obj_file.write(f"v {x0} {z+zs} {y1}\n")
                         
                         # Faces (1-based indices)
-                        # Back: 0 1 2 3 (CCW from back)
-                        # Front: 4 5 6 7 (CCW from front)
-                        # Bottom: 0 1 5 4 (CCW from bottom)
-                        # Top: 3 2 6 7 (CCW from top)
-                        # Left: 0 4 7 3 (CCW from left)
-                        # Right: 1 5 6 2 (CCW from right)
+                        # Format: f v//vn
                         
                         vo = vertex_offset
-                        obj_file.write(f"f {vo} {vo+1} {vo+2} {vo+3}\n") # Back
-                        obj_file.write(f"f {vo+4} {vo+5} {vo+6} {vo+7}\n") # Front
-                        obj_file.write(f"f {vo} {vo+1} {vo+5} {vo+4}\n") # Bottom
-                        obj_file.write(f"f {vo+3} {vo+2} {vo+6} {vo+7}\n") # Top
-                        obj_file.write(f"f {vo} {vo+4} {vo+7} {vo+3}\n") # Left
-                        obj_file.write(f"f {vo+1} {vo+5} {vo+6} {vo+2}\n") # Right
+                        # Front (Z=y0) -> Normal 1 (0, 0, -1)
+                        # 0(BL) -> 4(TL) -> 5(TR) -> 1(BR)
+                        obj_file.write(f"f {vo}//1 {vo+4}//1 {vo+5}//1 {vo+1}//1\n")
+                        
+                        # Back (Z=y1) -> Normal 2 (0, 0, 1)
+                        # 3(BL) -> 2(BR) -> 6(TR) -> 7(TL)
+                        obj_file.write(f"f {vo+3}//2 {vo+2}//2 {vo+6}//2 {vo+7}//2\n")
+                        
+                        # Bottom (Y=z) -> Normal 3 (0, -1, 0)
+                        # 0(FL) -> 1(FR) -> 2(BR) -> 3(BL)
+                        obj_file.write(f"f {vo}//3 {vo+1}//3 {vo+2}//3 {vo+3}//3\n")
+                        
+                        # Top (Y=z+zs) -> Normal 4 (0, 1, 0)
+                        # 4(FL) -> 7(BL) -> 6(BR) -> 5(FR)
+                        obj_file.write(f"f {vo+4}//4 {vo+7}//4 {vo+6}//4 {vo+5}//4\n")
+                        
+                        # Left (X=x0) -> Normal 5 (-1, 0, 0)
+                        # 0(BF) -> 3(BB) -> 7(TB) -> 4(TF)
+                        obj_file.write(f"f {vo}//5 {vo+3}//5 {vo+7}//5 {vo+4}//5\n")
+                        
+                        # Right (X=x1) -> Normal 6 (1, 0, 0)
+                        # 1(BF) -> 5(TF) -> 6(TB) -> 2(BB)
+                        obj_file.write(f"f {vo+1}//6 {vo+5}//6 {vo+6}//6 {vo+2}//6\n")
                         
                         vertex_offset += 8
 
@@ -539,7 +565,7 @@ class MainWindow(QMainWindow):
         add_param("Epaisseur Couche:", self.spin_depth)
 
         self.spin_scale_xy = QDoubleSpinBox()
-        self.spin_scale_xy.setRange(0.001, 100.0)
+        self.spin_scale_xy.setRange(0.001, 10000.0)
         self.spin_scale_xy.setSingleStep(0.01)
         self.spin_scale_xy.setDecimals(4)
         self.spin_scale_xy.setValue(0.1)
@@ -661,8 +687,8 @@ class MainWindow(QMainWindow):
                 # 0.1 unit = 1 cm => 1 unit = 10 cm
                 # width_cm = width * xy_scale * 10
                 current_xy = self.spin_scale_xy.value()
-                w_cm = width * current_xy * 10.0
-                h_cm = height * current_xy * 10.0
+                w_cm = width * current_xy * 10.0 / 1000.0
+                h_cm = height * current_xy * 10.0 / 1000.0
                 
                 self.spin_width_cm.setValue(w_cm)
                 self.spin_height_cm.setValue(h_cm)
@@ -679,7 +705,7 @@ class MainWindow(QMainWindow):
         self.spin_height_cm.blockSignals(block)
 
     def update_depth(self, value):
-        self.voxel_widget.z_scale = value
+        self.voxel_widget.z_scale = value * 10.0
         self.voxel_widget.update()
 
     def update_voxel_scale_xy(self):
@@ -691,8 +717,8 @@ class MainWindow(QMainWindow):
             return
         
         width, height = self.processed_layers[0]['layer'].size
-        w_cm = width * value * 10.0
-        h_cm = height * value * 10.0
+        w_cm = width * value * 10.0 / 1000.0
+        h_cm = height * value * 10.0 / 1000.0
         
         self.block_signals_dimensions(True)
         self.spin_width_cm.setValue(w_cm)
@@ -710,7 +736,7 @@ class MainWindow(QMainWindow):
         
         new_h_cm = value * aspect_ratio
         # xy_scale = width_cm / (width_px * 10)
-        new_scale = value / (width * 10.0)
+        new_scale = (value * 1000.0) / (width * 10.0)
         
         self.block_signals_dimensions(True)
         self.spin_height_cm.setValue(new_h_cm)
@@ -728,7 +754,7 @@ class MainWindow(QMainWindow):
         
         new_w_cm = value * aspect_ratio
         # xy_scale = height_cm / (height_px * 10)
-        new_scale = value / (height * 10.0)
+        new_scale = (value * 1000.0) / (height * 10.0)
         
         self.block_signals_dimensions(True)
         self.spin_width_cm.setValue(new_w_cm)
@@ -795,7 +821,7 @@ class MainWindow(QMainWindow):
             
             path, _ = QFileDialog.getSaveFileName(self, "Exporter OBJ", os.path.join(default_dir, "output.obj"), "OBJ Files (*.obj)")
             if path:
-                save_to_obj(self.processed_layers, path, self.spin_depth.value(), self.spin_scale_xy.value())
+                save_to_obj(self.processed_layers, path, self.spin_depth.value() * 10.0, self.spin_scale_xy.value())
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
