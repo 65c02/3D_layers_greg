@@ -2,6 +2,10 @@ from PIL import Image, ImageQt
 import sys
 import os
 
+CENTIMETRE_FACTOR = 1000.0
+EPAISSEUR_FACTEUR = 10.0
+
+
 # Check for PyQt5
 try:
     from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
@@ -562,7 +566,7 @@ class MainWindow(QMainWindow):
         self.spin_depth.setSingleStep(0.01)
         self.spin_depth.setValue(0.1) # Default to 0.1 fixed thickness
         self.spin_depth.valueChanged.connect(self.update_depth)
-        add_param("Epaisseur Couche:", self.spin_depth)
+        add_param("Epaisseur Couche (cm):", self.spin_depth)
 
         self.spin_scale_xy = QDoubleSpinBox()
         self.spin_scale_xy.setRange(0.001, 10000.0)
@@ -655,6 +659,14 @@ class MainWindow(QMainWindow):
             self.btn_export_obj.setEnabled(False)
             self.voxel_widget.set_layers([])
 
+            # Update color count based on image
+            # Try to count unique colors up to 256
+            colors = img.getcolors(maxcolors=256)
+            if colors:
+                self.spin_colors.setValue(len(colors))
+            else:
+                self.spin_colors.setValue(256)
+
     def process_image(self):
         if not self.current_image_path:
             return
@@ -687,9 +699,9 @@ class MainWindow(QMainWindow):
                 # 0.1 unit = 1 cm => 1 unit = 10 cm
                 # width_cm = width * xy_scale * 10
                 current_xy = self.spin_scale_xy.value()
-                w_cm = width * current_xy * 10.0 / 1000.0
-                h_cm = height * current_xy * 10.0 / 1000.0
-                
+                w_cm = width * current_xy / CENTIMETRE_FACTOR
+                h_cm = height * current_xy / CENTIMETRE_FACTOR
+
                 self.spin_width_cm.setValue(w_cm)
                 self.spin_height_cm.setValue(h_cm)
                 self.block_signals_dimensions(False)
@@ -705,7 +717,7 @@ class MainWindow(QMainWindow):
         self.spin_height_cm.blockSignals(block)
 
     def update_depth(self, value):
-        self.voxel_widget.z_scale = value * 10.0
+        self.voxel_widget.z_scale = value * EPAISSEUR_FACTEUR
         self.voxel_widget.update()
 
     def update_voxel_scale_xy(self):
@@ -717,8 +729,8 @@ class MainWindow(QMainWindow):
             return
         
         width, height = self.processed_layers[0]['layer'].size
-        w_cm = width * value * 10.0 / 1000.0
-        h_cm = height * value * 10.0 / 1000.0
+        w_cm = width * value * CENTIMETRE_FACTOR
+        h_cm = height * value * CENTIMETRE_FACTOR
         
         self.block_signals_dimensions(True)
         self.spin_width_cm.setValue(w_cm)
@@ -736,7 +748,7 @@ class MainWindow(QMainWindow):
         
         new_h_cm = value * aspect_ratio
         # xy_scale = width_cm / (width_px * 10)
-        new_scale = (value * 1000.0) / (width * 10.0)
+        new_scale = (value * CENTIMETRE_FACTOR) / width
         
         self.block_signals_dimensions(True)
         self.spin_height_cm.setValue(new_h_cm)
@@ -754,7 +766,7 @@ class MainWindow(QMainWindow):
         
         new_w_cm = value * aspect_ratio
         # xy_scale = height_cm / (height_px * 10)
-        new_scale = (value * 1000.0) / (height * 10.0)
+        new_scale = (value * CENTIMETRE_FACTOR) / height 
         
         self.block_signals_dimensions(True)
         self.spin_width_cm.setValue(new_w_cm)
@@ -821,7 +833,7 @@ class MainWindow(QMainWindow):
             
             path, _ = QFileDialog.getSaveFileName(self, "Exporter OBJ", os.path.join(default_dir, "output.obj"), "OBJ Files (*.obj)")
             if path:
-                save_to_obj(self.processed_layers, path, self.spin_depth.value() * 10.0, self.spin_scale_xy.value())
+                save_to_obj(self.processed_layers, path, self.spin_depth.value(), self.spin_scale_xy.value())
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
