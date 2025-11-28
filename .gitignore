@@ -1,0 +1,4 @@
+build/*
+!build/simple.exe
+antigravity.code-workspace
+simple.spec

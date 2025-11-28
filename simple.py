@@ -532,7 +532,7 @@ class VoxelWidget(QOpenGLWidget):
             num_layers = len(self.layers_data)
             
             # Apply scaling FIRST
-            glScalef(self.xy_scale, self.z_scale, self.xy_scale)
+            glScalef(self.xy_scale, self.xy_scale, self.xy_scale)
             
             # Then translate to center
             glTranslatef(-width / 2.0, -num_layers / 2.0, -height / 2.0)
