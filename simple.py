@@ -881,23 +881,37 @@ class MainWindow(QMainWindow):
         palette_img = load_and_convert_to_palette(self.current_image_path, num_colors)
         
         if palette_img:
-            # Get current order if exists
+            # Get current order and enabled states if exists
             custom_order = []
+            enabled_states = {}
             if self.layers_list.count() > 0:
                 for i in range(self.layers_list.count()):
                     item = self.layers_list.item(i)
                     data = item.data(Qt.UserRole)
                     if data and 'index' in data:
-                        custom_order.append(data['index'])
+                        idx = data['index']
+                        custom_order.append(idx)
+                        # Retrieve checkbox state from the widget
+                        widget = self.layers_list.itemWidget(item)
+                        if widget:
+                            chk = widget.findChild(QCheckBox)
+                            if chk:
+                                enabled_states[idx] = chk.isChecked()
 
             # Generate layers
             self.processed_layers = generate_palette_layers(palette_img, custom_order)
+            
+            # Apply enabled states
+            for layer in self.processed_layers:
+                idx = layer['index']
+                layer['enabled'] = enabled_states.get(idx, True) # Default to True
+                
             self.display_layers()
             
             # Update Voxel Widget
             # Ensure optimization state is set
             self.voxel_widget.optimization_enabled = self.chk_optimization.isChecked()
-            self.voxel_widget.set_layers(self.processed_layers)
+            self.update_voxel_layers()
             self.update_depth(self.spin_depth.value())
             
             # Initialize dimensions based on image size and default xy_scale
@@ -1011,6 +1025,15 @@ class MainWindow(QMainWindow):
     def clear_layers_grid(self):
         self.layers_list.clear()
 
+    def update_voxel_layers(self):
+        if not self.processed_layers:
+            self.voxel_widget.set_layers([])
+            return
+            
+        # Filter enabled layers
+        active_layers = [layer for layer in self.processed_layers if layer.get('enabled', True)]
+        self.voxel_widget.set_layers(active_layers)
+
     def display_layers(self):
         self.clear_layers_grid()
         
@@ -1019,6 +1042,12 @@ class MainWindow(QMainWindow):
             widget = QWidget()
             layout = QHBoxLayout(widget)
             layout.setContentsMargins(5, 2, 5, 2)
+            
+            # Checkbox
+            chk = QCheckBox()
+            chk.setChecked(item.get('enabled', True))
+            chk.stateChanged.connect(lambda state, idx=i: self.on_layer_toggled(idx, state))
+            layout.addWidget(chk)
             
             # Index
             layout.addWidget(QLabel(str(item['index'])))
@@ -1046,6 +1075,13 @@ class MainWindow(QMainWindow):
             list_item.setData(Qt.UserRole, item)
             
             self.layers_list.setItemWidget(list_item, widget)
+
+    def on_layer_toggled(self, list_index, state):
+        # Update the enabled state in processed_layers
+        # Note: list_index corresponds to the index in processed_layers because display_layers iterates it
+        if 0 <= list_index < len(self.processed_layers):
+            self.processed_layers[list_index]['enabled'] = (state == Qt.Checked)
+            self.update_voxel_layers()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
