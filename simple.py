@@ -127,9 +127,10 @@ def save_layers_to_disk(layers_data, output_dir="sub_images"):
         layer.save(filepath)
         print(f"Sauvegardé: {filepath}")
 
-def save_to_obj(faces, output_path, z_scale=1.0, xy_scale=1.0):
+def save_to_obj(faces, output_path, z_scale=1.0, xy_scale=1.0, optimize_vertices=False):
     """
     Exports faces to an OBJ file with an associated MTL file for colors.
+    If optimize_vertices is True, merges vertices at the same position (tolerance 0.0001).
     """
     base_name = os.path.splitext(os.path.basename(output_path))[0]
     dir_name = os.path.dirname(output_path)
@@ -164,101 +165,190 @@ def save_to_obj(faces, output_path, z_scale=1.0, xy_scale=1.0):
     with open(output_path, 'w') as obj_file:
         obj_file.write(f"mtllib {mtl_filename}\n")
         
-        vertex_offset = 1
-        
-        # Group faces by material to minimize usemtl calls (optional but good practice)
-        # Or just write them as is. Let's write as is for simplicity or sort if needed.
-        # Sorting by material might be better.
+        # Group faces by material to minimize usemtl calls
         faces.sort(key=lambda f: materials[f['color']])
         
         current_mat_id = -1
         
-        for face in faces:
-            # Material
-            mat_id = materials[face['color']]
-            if mat_id != current_mat_id:
-                obj_file.write(f"usemtl material_{mat_id}\n")
-                current_mat_id = mat_id
+        if optimize_vertices:
+            # Vertex merging logic
+            unique_vertices = {} # Map (x,y,z) -> index (1-based)
+            next_vertex_idx = 1
             
-            # Vertices
-            # Apply scaling
-            # v = (x, y, z) -> (x*xy, y*z_scale, z*xy)
-            # Note: y is stack (up), z is depth.
-            # OBJ Y is Up.
+            # First pass: Write all unique vertices
+            # We need to process faces in order to write vertices? 
+            # No, OBJ format allows defining all vertices first, then faces.
+            # But we need to know the index for each vertex in each face.
             
-            for v in face['vertices']:
-                vx = v[0] * xy_scale
-                vy = v[1] * z_scale
-                vz = v[2] * xy_scale
-                obj_file.write(f"v {vx:.6f} {vy:.6f} {vz:.6f}\n")
+            # Let's iterate faces and write vertices as we encounter new ones
+            # This keeps the file structure somewhat similar (interleaved v and f is allowed but standard is v block then f block usually, or mixed)
+            # Standard is usually all v, then all vn, then all f.
+            # But writing sequentially is also fine.
+            
+            # To be safe and standard, let's collect all unique vertices first.
+            # Actually, for streaming write, we can just check if seen.
+            
+            # We will use a buffer for faces to write them after vertices?
+            # Or just write v lines as we go?
+            # If we write v lines as we go, the indices are correct.
+            
+            # Wait, if we share vertices, we must ensure a vertex is written only once.
+            # If we encounter a vertex that was already written, we use its index.
+            
+            # So:
+            # Iterate all faces.
+            # For each vertex in face:
+            #   Round coords.
+            #   If not in unique_vertices:
+            #     Write "v ..."
+            #     unique_vertices[coords] = next_vertex_idx
+            #     next_vertex_idx += 1
+            #   Get index.
+            # Store face indices.
+            
+            # Since we need to group by material for faces, we should probably buffer the face definitions
+            # or just write vertices as needed?
+            # If we write vertices as needed, they will be interleaved with usemtl?
+            # OBJ parsers usually handle this, but it's cleaner to write all vertices first.
+            
+            # Let's do two passes:
+            # 1. Collect all vertices and assign indices.
+            # 2. Write all vertices.
+            # 3. Write faces.
+            
+            # But wait, we are iterating faces sorted by material.
+            # So we can just iterate, collect vertices, then write.
+            
+            # Re-sort faces by material (already done above)
+            
+            # Collect vertices
+            vertex_buffer = [] # List of (x,y,z) strings
+            face_buffer = [] # List of (material_id, [v_indices], normal)
+            
+            for face in faces:
+                mat_id = materials[face['color']]
                 
-            # Normal
-            nx, ny, nz = face['normal']
-            obj_file.write(f"vn {nx} {ny} {nz}\n")
+                # Normal
+                nx, ny, nz = face['normal']
+                # We can just write normal per face in the f line? No, f uses indices.
+                # We need to write normals too.
+                # Let's assume we write one normal per face for simplicity as before, 
+                # or reuse normals?
+                # The previous code wrote one normal per face inline? 
+                # No, previous code wrote `vn` then `f`.
+                
+                # Let's keep writing `vn` before `f` for each face, 
+                # OR write all `vn` first.
+                # Writing `vn` before `f` is fine.
+                
+                face_v_indices = []
+                for v in face['vertices']:
+                    vx = v[0] * xy_scale
+                    vy = v[1] * z_scale
+                    vz = v[2] * xy_scale
+                    
+                    # Round for uniqueness check
+                    key = (round(vx, 4), round(vy, 4), round(vz, 4))
+                    
+                    if key not in unique_vertices:
+                        unique_vertices[key] = next_vertex_idx
+                        obj_file.write(f"v {vx:.6f} {vy:.6f} {vz:.6f}\n")
+                        next_vertex_idx += 1
+                    
+                    face_v_indices.append(unique_vertices[key])
+                
+                # Write Normal
+                obj_file.write(f"vn {nx} {ny} {nz}\n")
+                normal_idx = len(faces) # Wait, normal index?
+                # We are writing normals sequentially.
+                # We need to track normal count.
+                # Since we write one normal per face, the normal index for this face 
+                # is the current face count processed + 1.
+                # But we are inside the loop.
+                # We need a counter for normals written.
+                
+                # Actually, let's just use a counter.
+                
+            # Wait, I cannot write to file in two passes if I am writing to file directly.
+            # I should write all vertices first?
+            # If I write v lines interleaved with f lines, it is valid OBJ?
+            # Yes, it is valid.
             
-            # Face
-            # f v1//vn v2//vn v3//vn v4//vn
-            # Vertices are written in order, so they are vertex_offset, +1, +2, +3
-            # Normal index is 1 (since we write one normal per face, wait.
-            # Actually we write one normal per face? No, we write normals as needed.
-            # But here we can just write the normal for the face and reference it.
-            # Or simpler: we write the normal once?
-            # Wait, `vn` indices are global.
-            # If we write `vn` for every face, the index increments.
+            # However, if I want to merge vertices globally, I should probably identify them all first.
+            # But if I do it on the fly, it works too:
+            # Face 1 uses V1, V2, V3. Write V1, V2, V3. Write F 1 2 3.
+            # Face 2 uses V2, V3, V4. V2, V3 known. Write V4. Write F 2 3 4.
+            # This is valid.
             
-            # Let's write the normal for this face.
-            # Normal index = face_index + 1
-            # Vertex indices = vertex_offset ... vertex_offset+3
+            # So let's do that.
             
-            # Actually, reusing normals is better, but writing one per face is easier.
-            # Let's check if we can reuse standard normals.
-            # We have 6 standard normals.
-            # But let's just write it to be safe.
+            normal_counter = 1
             
-            # Actually, standard normals are better.
-            # But my `generate_faces` returns a tuple.
-            # Let's just write the normal index.
-            # I'll write the normal for each face.
+            for face in faces:
+                # Material
+                mat_id = materials[face['color']]
+                if mat_id != current_mat_id:
+                    obj_file.write(f"usemtl material_{mat_id}\n")
+                    current_mat_id = mat_id
+                
+                face_indices = []
+                for v in face['vertices']:
+                    vx = v[0] * xy_scale
+                    vy = v[1] * z_scale
+                    vz = v[2] * xy_scale
+                    
+                    key = (round(vx, 4), round(vy, 4), round(vz, 4))
+                    
+                    if key not in unique_vertices:
+                        unique_vertices[key] = next_vertex_idx
+                        obj_file.write(f"v {vx:.6f} {vy:.6f} {vz:.6f}\n")
+                        next_vertex_idx += 1
+                    
+                    face_indices.append(unique_vertices[key])
+                
+                # Normal
+                nx, ny, nz = face['normal']
+                obj_file.write(f"vn {nx} {ny} {nz}\n")
+                
+                # Face
+                # f v1//vn v2//vn ...
+                f_str = "f"
+                for v_idx in face_indices:
+                    f_str += f" {v_idx}//{normal_counter}"
+                obj_file.write(f_str + "\n")
+                
+                normal_counter += 1
+                
+        else:
+            # Unoptimized (original behavior)
+            vertex_offset = 1
             
-            vn_idx = vertex_offset // 4 + 1 # Rough approximation if we wrote 4 verts per face? No.
-            # We write 1 normal per face.
-            # So normal index is current face index + 1.
-            # Wait, OBJ indices are 1-based global.
-            # We are writing `vn` inside the loop.
-            # So for face i (0-based):
-            # We have written i normals before this one.
-            # So this normal is index i+1.
-            # We have written i*4 vertices before this one.
-            # So vertices are i*4+1, i*4+2, i*4+3, i*4+4.
-            
-            # Wait, vertex_offset is tracked.
-            
-            # Correct logic:
-            # We write 4 vertices.
-            # We write 1 normal.
-            # vn index is current global normal count.
-            # v indices are current global vertex count.
-            
-            # We need to track global counts.
-            # But since we write them sequentially:
-            # Vertices: range(vertex_offset, vertex_offset+4)
-            # Normal: face_index + 1 (if we write one per face)
-            
-            # Wait, I am writing `vn` inside the loop.
-            # So the normal index is simply the number of `vn` lines written so far.
-            # Which is `face_index + 1` if we enumerate.
-            
-            # But wait, I am iterating `faces`.
-            # Let's just use a counter for normals too if I want to be explicit, or just calculate.
-            
-            # Actually, let's just write the normal and use relative indexing? No, standard OBJ uses absolute.
-            
-            # Let's use a counter.
-            normal_index = (vertex_offset - 1) // 4 + 1
-            
-            obj_file.write(f"f {vertex_offset}//{normal_index} {vertex_offset+1}//{normal_index} {vertex_offset+2}//{normal_index} {vertex_offset+3}//{normal_index}\n")
-            
-            vertex_offset += 4
+            for face in faces:
+                # Material
+                mat_id = materials[face['color']]
+                if mat_id != current_mat_id:
+                    obj_file.write(f"usemtl material_{mat_id}\n")
+                    current_mat_id = mat_id
+                
+                # Vertices
+                for v in face['vertices']:
+                    vx = v[0] * xy_scale
+                    vy = v[1] * z_scale
+                    vz = v[2] * xy_scale
+                    obj_file.write(f"v {vx:.6f} {vy:.6f} {vz:.6f}\n")
+                    
+                # Normal
+                nx, ny, nz = face['normal']
+                obj_file.write(f"vn {nx} {ny} {nz}\n")
+                
+                # Face
+                # Normal index is derived from face count since we write 1 normal per face
+                # We can calculate it: (vertex_offset - 1) // 4 + 1
+                normal_index = (vertex_offset - 1) // 4 + 1
+                
+                obj_file.write(f"f {vertex_offset}//{normal_index} {vertex_offset+1}//{normal_index} {vertex_offset+2}//{normal_index} {vertex_offset+3}//{normal_index}\n")
+                
+                vertex_offset += 4
 
     print(f"Export OBJ terminé: {output_path}")
 
@@ -416,7 +506,7 @@ def optimize_faces(faces):
     for face in faces:
         # Create a key from sorted vertices
         # Round to avoid float precision issues
-        verts = sorted([tuple(round(c, 5) for c in v) for v in face['vertices']])
+        verts = sorted([tuple(round(c, 4) for c in v) for v in face['vertices']])
         key = tuple(verts)
         face_groups[key].append(face)
         
@@ -435,8 +525,8 @@ def optimize_faces(faces):
 
 
 class VoxelWidget(QOpenGLWidget):
-    # Signal emitting (original_faces, optimized_faces, cube_count)
-    meshOptimized = pyqtSignal(int, int, int) 
+    # Signal emitting (original_faces, optimized_faces, cube_count, original_vertices, optimized_vertices)
+    meshOptimized = pyqtSignal(int, int, int, int, int) 
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -460,10 +550,18 @@ class VoxelWidget(QOpenGLWidget):
             self.optimization_enabled = enabled
             self.update_mesh()
 
+    def count_unique_vertices(self, faces):
+        unique_verts = set()
+        for face in faces:
+            for v in face['vertices']:
+                # Round to avoid float precision issues, same as in save_to_obj
+                unique_verts.add(tuple(round(c, 4) for c in v))
+        return len(unique_verts)
+
     def update_mesh(self):
         if not self.layers_data:
             self.faces = []
-            self.meshOptimized.emit(0, 0, 0)
+            self.meshOptimized.emit(0, 0, 0, 0, 0)
             self.update()
             return
 
@@ -473,13 +571,28 @@ class VoxelWidget(QOpenGLWidget):
         # Each cube has 6 faces, so cube count is faces / 6
         cube_count = original_count // 6
         
+        # Original vertices count (4 per face)
+        original_vertices_count = original_count * 4
+        
         optimized_count = original_count
+        optimized_vertices_count = original_vertices_count
+        
         if self.optimization_enabled:
             faces, removed_count = optimize_faces(faces)
             optimized_count = len(faces)
+            optimized_vertices_count = self.count_unique_vertices(faces)
+        else:
+            # Even if not optimizing faces, we might want to know how many unique vertices there WOULD be?
+            # Or just report the raw count. The user asked for "before and after optimization".
+            # If optimization is disabled, "after" is same as "before" effectively, 
+            # or we can calculate what it would be? 
+            # Usually "after" implies "current state".
+            # But if optimization is OFF, the current state is unoptimized.
+            # So optimized_vertices_count should be same as original if OFF.
+            pass
             
         self.faces = faces
-        self.meshOptimized.emit(original_count, optimized_count, cube_count)
+        self.meshOptimized.emit(original_count, optimized_count, cube_count, original_vertices_count, optimized_vertices_count)
         self.update()
 
     def recalculate_zoom(self):
@@ -532,7 +645,7 @@ class VoxelWidget(QOpenGLWidget):
             num_layers = len(self.layers_data)
             
             # Apply scaling FIRST
-            glScalef(self.xy_scale, self.xy_scale, self.xy_scale)
+            glScalef(self.xy_scale, self.z_scale, self.xy_scale)
             
             # Then translate to center
             glTranslatef(-width / 2.0, -num_layers / 2.0, -height / 2.0)
@@ -809,8 +922,8 @@ class MainWindow(QMainWindow):
     def on_optimization_changed(self, state):
         self.voxel_widget.set_optimization(state == Qt.Checked)
 
-    def update_stats(self, original, optimized, cubes):
-        text = f"Cubes (Pixels): {cubes}\nPolygones: {original} -> {optimized}"
+    def update_stats(self, original, optimized, cubes, orig_verts, opt_verts):
+        text = f"Cubes (Pixels): {cubes}\nPolygones: {original} -> {optimized}\nVertices: {orig_verts} -> {opt_verts}"
         self.lbl_stats.setText(text)
 
     def export_obj(self):
@@ -822,7 +935,8 @@ class MainWindow(QMainWindow):
             # Use the faces from the voxel widget (which are already optimized if enabled)
             save_to_obj(self.voxel_widget.faces, path, 
                        z_scale=self.voxel_widget.z_scale, 
-                       xy_scale=self.voxel_widget.xy_scale)
+                       xy_scale=self.voxel_widget.xy_scale,
+                       optimize_vertices=self.chk_optimization.isChecked())
 
     def block_signals_dimensions(self, block):
         self.spin_scale_xy.blockSignals(block)
