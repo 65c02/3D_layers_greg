@@ -435,7 +435,8 @@ def optimize_faces(faces):
 
 
 class VoxelWidget(QOpenGLWidget):
-    meshOptimized = pyqtSignal(int) # Signal emitting the number of removed polygons
+    # Signal emitting (original_faces, optimized_faces, cube_count)
+    meshOptimized = pyqtSignal(int, int, int) 
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -462,20 +463,23 @@ class VoxelWidget(QOpenGLWidget):
     def update_mesh(self):
         if not self.layers_data:
             self.faces = []
+            self.meshOptimized.emit(0, 0, 0)
             self.update()
             return
 
         # Generate full mesh
-        # Note: We generate with scale 1.0 here and apply scaling in paintGL via glScalef
-        # This keeps the logic simple and consistent with previous implementation
         faces = generate_faces(self.layers_data)
+        original_count = len(faces)
+        # Each cube has 6 faces, so cube count is faces / 6
+        cube_count = original_count // 6
         
-        removed_count = 0
+        optimized_count = original_count
         if self.optimization_enabled:
             faces, removed_count = optimize_faces(faces)
+            optimized_count = len(faces)
             
         self.faces = faces
-        self.meshOptimized.emit(removed_count)
+        self.meshOptimized.emit(original_count, optimized_count, cube_count)
         self.update()
 
     def recalculate_zoom(self):
@@ -676,7 +680,7 @@ class MainWindow(QMainWindow):
         
         # Optimization Checkbox
         self.chk_optimization = QCheckBox("Optimization")
-        self.chk_optimization.setChecked(False)
+        self.chk_optimization.setChecked(True)
         self.chk_optimization.stateChanged.connect(self.on_optimization_changed)
         controls_layout.addWidget(self.chk_optimization)
 
@@ -695,9 +699,9 @@ class MainWindow(QMainWindow):
         top_display_layout.addWidget(self.lbl_original, 1)
         
         # Stats Label where converted image was
-        self.lbl_stats = QLabel("Polygones enlevés: 0")
+        self.lbl_stats = QLabel("Stats: -")
         self.lbl_stats.setAlignment(Qt.AlignCenter)
-        self.lbl_stats.setStyleSheet("font-size: 16px; font-weight: bold; color: #333; border: 1px solid #ccc; background-color: #eee;")
+        self.lbl_stats.setStyleSheet("font-size: 14px; font-weight: bold; color: #333; border: 1px solid #ccc; background-color: #eee;")
         top_display_layout.addWidget(self.lbl_stats, 1)
         
         main_layout.addLayout(top_display_layout, 1)
@@ -746,7 +750,7 @@ class MainWindow(QMainWindow):
 
             self.btn_export_obj.setEnabled(False)
             self.voxel_widget.set_layers([])
-            self.lbl_stats.setText("Polygones enlevés: 0")
+            self.lbl_stats.setText("Stats: -")
 
             # Update color count based on image
             # Try to count unique colors up to 256
@@ -805,8 +809,9 @@ class MainWindow(QMainWindow):
     def on_optimization_changed(self, state):
         self.voxel_widget.set_optimization(state == Qt.Checked)
 
-    def update_stats(self, removed_count):
-        self.lbl_stats.setText(f"Polygones enlevés: {removed_count}")
+    def update_stats(self, original, optimized, cubes):
+        text = f"Cubes (Pixels): {cubes}\nPolygones: {original} -> {optimized}"
+        self.lbl_stats.setText(text)
 
     def export_obj(self):
         if not self.voxel_widget.faces:
