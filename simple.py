@@ -1,6 +1,7 @@
 from PIL import Image, ImageQt
 import sys
 import os
+from collections import defaultdict
 
 CENTIMETRE_FACTOR = 1000.0
 EPAISSEUR_FACTEUR = 10.0
@@ -11,9 +12,9 @@ try:
     from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                  QHBoxLayout, QPushButton, QLabel, QFileDialog, 
                                  QSpinBox, QScrollArea, QGridLayout, QFrame,
-                                 QListWidget, QListWidgetItem, QAbstractItemView)
-    from PyQt5.QtGui import QPixmap, QImage
-    from PyQt5.QtCore import Qt, QSize
+                                 QListWidget, QListWidgetItem, QAbstractItemView, QCheckBox)
+    from PyQt5.QtGui import QPixmap, QImage, QColor
+    from PyQt5.QtCore import Qt, QSize, pyqtSignal
     import math
 except ImportError:
     print("PyQt5 is required. Please install it with: pip install PyQt5")
@@ -126,10 +127,9 @@ def save_layers_to_disk(layers_data, output_dir="sub_images"):
         layer.save(filepath)
         print(f"Sauvegardé: {filepath}")
 
-def save_to_obj(layers_data, output_path, z_scale=1.0, xy_scale=1.0):
+def save_to_obj(faces, output_path, z_scale=1.0, xy_scale=1.0):
     """
-    Exports layers to an OBJ file with an associated MTL file for colors.
-    Each layer is a separate object (o layer_n).
+    Exports faces to an OBJ file with an associated MTL file for colors.
     """
     base_name = os.path.splitext(os.path.basename(output_path))[0]
     dir_name = os.path.dirname(output_path)
@@ -139,123 +139,126 @@ def save_to_obj(layers_data, output_path, z_scale=1.0, xy_scale=1.0):
     if not os.path.exists(dir_name) and dir_name:
         os.makedirs(dir_name)
 
+    # Collect unique colors for materials
+    # Map color tuple (r,g,b) to material index
+    materials = {}
+    next_mat_id = 0
+    
+    for face in faces:
+        color = face['color']
+        if color not in materials:
+            materials[color] = next_mat_id
+            next_mat_id += 1
+
     # Write MTL file
     with open(mtl_path, 'w') as mtl_file:
-        for item in layers_data:
-            index = item['index']
-            r, g, b = item['color']
-            # Normalize colors to 0-1
+        for color, mat_id in materials.items():
+            r, g, b = color
             rn, gn, bn = r / 255.0, g / 255.0, b / 255.0
-            mtl_file.write(f"newmtl material_{index}\n")
+            mtl_file.write(f"newmtl material_{mat_id}\n")
             mtl_file.write(f"Kd {rn:.4f} {gn:.4f} {bn:.4f}\n")
-            mtl_file.write("d 1.0\n") # Opaque
+            mtl_file.write("d 1.0\n")
             mtl_file.write("illum 2\n\n")
 
     # Write OBJ file
     with open(output_path, 'w') as obj_file:
         obj_file.write(f"mtllib {mtl_filename}\n")
         
-        # Write Normals
-        # 1: Front (0, 0, -1)
-        obj_file.write("vn 0.0 0.0 -1.0\n")
-        # 2: Back (0, 0, 1)
-        obj_file.write("vn 0.0 0.0 1.0\n")
-        # 3: Bottom (0, -1, 0)
-        obj_file.write("vn 0.0 -1.0 0.0\n")
-        # 4: Top (0, 1, 0)
-        obj_file.write("vn 0.0 1.0 0.0\n")
-        # 5: Left (-1, 0, 0)
-        obj_file.write("vn -1.0 0.0 0.0\n")
-        # 6: Right (1, 0, 0)
-        obj_file.write("vn 1.0 0.0 0.0\n")
-        
         vertex_offset = 1
         
-        for i, item in enumerate(layers_data):
-            index = item['index']
-            layer = item['layer']
-            width, height = layer.size
-            data = layer.tobytes("raw", "RGBA")
+        # Group faces by material to minimize usemtl calls (optional but good practice)
+        # Or just write them as is. Let's write as is for simplicity or sort if needed.
+        # Sorting by material might be better.
+        faces.sort(key=lambda f: materials[f['color']])
+        
+        current_mat_id = -1
+        
+        for face in faces:
+            # Material
+            mat_id = materials[face['color']]
+            if mat_id != current_mat_id:
+                obj_file.write(f"usemtl material_{mat_id}\n")
+                current_mat_id = mat_id
             
-            obj_file.write(f"o layer_{index}\n")
-            obj_file.write(f"usemtl material_{index}\n")
+            # Vertices
+            # Apply scaling
+            # v = (x, y, z) -> (x*xy, y*z_scale, z*xy)
+            # Note: y is stack (up), z is depth.
+            # OBJ Y is Up.
             
-            # Z-offset based on layer index (i)
-            z = float(i) * z_scale
+            for v in face['vertices']:
+                vx = v[0] * xy_scale
+                vy = v[1] * z_scale
+                vz = v[2] * xy_scale
+                obj_file.write(f"v {vx:.6f} {vy:.6f} {vz:.6f}\n")
+                
+            # Normal
+            nx, ny, nz = face['normal']
+            obj_file.write(f"vn {nx} {ny} {nz}\n")
             
-            # Scale factor for the cube depth
-            zs = z_scale
+            # Face
+            # f v1//vn v2//vn v3//vn v4//vn
+            # Vertices are written in order, so they are vertex_offset, +1, +2, +3
+            # Normal index is 1 (since we write one normal per face, wait.
+            # Actually we write one normal per face? No, we write normals as needed.
+            # But here we can just write the normal for the face and reference it.
+            # Or simpler: we write the normal once?
+            # Wait, `vn` indices are global.
+            # If we write `vn` for every face, the index increments.
             
-            for y in range(height):
-                for x in range(width):
-                    pixel_idx = (y * width + x) * 4
-                    a = data[pixel_idx + 3]
-                    
-                    if a > 0:
-                        # Invert Y to match OpenGL/Image coords usually (0,0 is top-left in PIL, bottom-left in 3D usually)
-                        # Let's keep it consistent with VoxelWidget: height - 1 - y
-                        y_pos = height - 1 - y
-                        
-                        # Define 8 vertices for the cube at x, y_pos, z
-                        # v x y z
-                        # 0: x, y, z
-                        # 1: x+1, y, z
-                        # 2: x+1, y+1, z
-                        # 3: x, y+1, z
-                        # 4: x, y, z+1
-                        # 5: x+1, y, z+1
-                        # 6: x+1, y+1, z+1
-                        # 7: x, y+1, z+1
-                        
-                        # Apply XY scaling
-                        x0 = x * xy_scale
-                        x1 = (x + 1) * xy_scale
-                        y0 = y_pos * xy_scale
-                        y1 = (y_pos + 1) * xy_scale
-
-                        # Swap Y and Z for OBJ export (Y is up/thickness, Z is depth/image-y)
-                        # v x y z -> v x z y
-                        # z (stack) becomes y (height)
-                        # y (image) becomes z (depth)
-                        
-                        obj_file.write(f"v {x0} {z} {y0}\n")
-                        obj_file.write(f"v {x1} {z} {y0}\n")
-                        obj_file.write(f"v {x1} {z} {y1}\n")
-                        obj_file.write(f"v {x0} {z} {y1}\n")
-                        obj_file.write(f"v {x0} {z+zs} {y0}\n")
-                        obj_file.write(f"v {x1} {z+zs} {y0}\n")
-                        obj_file.write(f"v {x1} {z+zs} {y1}\n")
-                        obj_file.write(f"v {x0} {z+zs} {y1}\n")
-                        
-                        # Faces (1-based indices)
-                        # Format: f v//vn
-                        
-                        vo = vertex_offset
-                        # Front (Z=y0) -> Normal 1 (0, 0, -1)
-                        # 0(BL) -> 4(TL) -> 5(TR) -> 1(BR)
-                        obj_file.write(f"f {vo}//1 {vo+4}//1 {vo+5}//1 {vo+1}//1\n")
-                        
-                        # Back (Z=y1) -> Normal 2 (0, 0, 1)
-                        # 3(BL) -> 2(BR) -> 6(TR) -> 7(TL)
-                        obj_file.write(f"f {vo+3}//2 {vo+2}//2 {vo+6}//2 {vo+7}//2\n")
-                        
-                        # Bottom (Y=z) -> Normal 3 (0, -1, 0)
-                        # 0(FL) -> 1(FR) -> 2(BR) -> 3(BL)
-                        obj_file.write(f"f {vo}//3 {vo+1}//3 {vo+2}//3 {vo+3}//3\n")
-                        
-                        # Top (Y=z+zs) -> Normal 4 (0, 1, 0)
-                        # 4(FL) -> 7(BL) -> 6(BR) -> 5(FR)
-                        obj_file.write(f"f {vo+4}//4 {vo+7}//4 {vo+6}//4 {vo+5}//4\n")
-                        
-                        # Left (X=x0) -> Normal 5 (-1, 0, 0)
-                        # 0(BF) -> 3(BB) -> 7(TB) -> 4(TF)
-                        obj_file.write(f"f {vo}//5 {vo+3}//5 {vo+7}//5 {vo+4}//5\n")
-                        
-                        # Right (X=x1) -> Normal 6 (1, 0, 0)
-                        # 1(BF) -> 5(TF) -> 6(TB) -> 2(BB)
-                        obj_file.write(f"f {vo+1}//6 {vo+5}//6 {vo+6}//6 {vo+2}//6\n")
-                        
-                        vertex_offset += 8
+            # Let's write the normal for this face.
+            # Normal index = face_index + 1
+            # Vertex indices = vertex_offset ... vertex_offset+3
+            
+            # Actually, reusing normals is better, but writing one per face is easier.
+            # Let's check if we can reuse standard normals.
+            # We have 6 standard normals.
+            # But let's just write it to be safe.
+            
+            # Actually, standard normals are better.
+            # But my `generate_faces` returns a tuple.
+            # Let's just write the normal index.
+            # I'll write the normal for each face.
+            
+            vn_idx = vertex_offset // 4 + 1 # Rough approximation if we wrote 4 verts per face? No.
+            # We write 1 normal per face.
+            # So normal index is current face index + 1.
+            # Wait, OBJ indices are 1-based global.
+            # We are writing `vn` inside the loop.
+            # So for face i (0-based):
+            # We have written i normals before this one.
+            # So this normal is index i+1.
+            # We have written i*4 vertices before this one.
+            # So vertices are i*4+1, i*4+2, i*4+3, i*4+4.
+            
+            # Wait, vertex_offset is tracked.
+            
+            # Correct logic:
+            # We write 4 vertices.
+            # We write 1 normal.
+            # vn index is current global normal count.
+            # v indices are current global vertex count.
+            
+            # We need to track global counts.
+            # But since we write them sequentially:
+            # Vertices: range(vertex_offset, vertex_offset+4)
+            # Normal: face_index + 1 (if we write one per face)
+            
+            # Wait, I am writing `vn` inside the loop.
+            # So the normal index is simply the number of `vn` lines written so far.
+            # Which is `face_index + 1` if we enumerate.
+            
+            # But wait, I am iterating `faces`.
+            # Let's just use a counter for normals too if I want to be explicit, or just calculate.
+            
+            # Actually, let's just write the normal and use relative indexing? No, standard OBJ uses absolute.
+            
+            # Let's use a counter.
+            normal_index = (vertex_offset - 1) // 4 + 1
+            
+            obj_file.write(f"f {vertex_offset}//{normal_index} {vertex_offset+1}//{normal_index} {vertex_offset+2}//{normal_index} {vertex_offset+3}//{normal_index}\n")
+            
+            vertex_offset += 4
 
     print(f"Export OBJ terminé: {output_path}")
 
@@ -301,10 +304,145 @@ from OpenGL.GLU import *
 from PyQt5.QtWidgets import QOpenGLWidget
 from PyQt5.QtGui import QQuaternion, QVector3D
 
+def generate_faces(layers_data, xy_scale=1.0, z_scale=1.0):
+    """
+    Generates a list of faces for the voxel model.
+    Each face is a dict: {'vertices': [(x,y,z), ...], 'normal': (nx,ny,nz), 'color': (r,g,b)}
+    """
+    faces = []
+    
+    # Normals
+    n_front = (0.0, 0.0, 1.0) # Z+
+    n_back = (0.0, 0.0, -1.0) # Z-
+    n_top = (0.0, 1.0, 0.0)   # Y+
+    n_bottom = (0.0, -1.0, 0.0) # Y-
+    n_right = (1.0, 0.0, 0.0) # X+
+    n_left = (-1.0, 0.0, 0.0) # X-
+
+    for i, item in enumerate(layers_data):
+        layer = item['layer']
+        width, height = layer.size
+        data = layer.tobytes("raw", "RGBA")
+        color = item['color']
+        
+        # Z-offset based on layer index (i)
+        # In our 3D view:
+        # x -> x
+        # y (stack) -> i
+        # z (depth) -> height - 1 - y_img
+        
+        # But wait, the VoxelWidget.draw_cube uses:
+        # glVertex3f(x, y, z+1) where y is the stack index.
+        # So Y is UP (stack).
+        # X is Right.
+        # Z is Depth (image Y).
+        
+        y_stack = float(i)
+        
+        for y_img in range(height):
+            for x_img in range(width):
+                idx = (y_img * width + x_img) * 4
+                a = data[idx+3]
+                
+                if a > 0:
+                    # Calculate coordinates
+                    # x, y, z in the loop of draw_cube correspond to:
+                    # x = x_img
+                    # y = i (layer index)
+                    # z = height - 1 - y_img
+                    
+                    x = float(x_img)
+                    y = y_stack
+                    z = float(height - 1 - y_img)
+                    
+                    # Vertices for the unit cube at (x, y, z)
+                    # v0: x, y, z
+                    # v1: x+1, y, z
+                    # v2: x+1, y+1, z
+                    # v3: x, y+1, z
+                    # v4: x, y, z+1
+                    # v5: x+1, y, z+1
+                    # v6: x+1, y+1, z+1
+                    # v7: x, y+1, z+1
+                    
+                    v0 = (x, y, z)
+                    v1 = (x+1, y, z)
+                    v2 = (x+1, y+1, z)
+                    v3 = (x, y+1, z)
+                    v4 = (x, y, z+1)
+                    v5 = (x+1, y, z+1)
+                    v6 = (x+1, y+1, z+1)
+                    v7 = (x, y+1, z+1)
+                    
+                    # Add faces
+                    # Front (Z+): v4, v5, v6, v7. Normal (0,0,1)
+                    faces.append({'vertices': [v4, v5, v6, v7], 'normal': n_front, 'color': color})
+                    
+                    # Back (Z-): v0, v3, v2, v1. Normal (0,0,-1)
+                    faces.append({'vertices': [v0, v3, v2, v1], 'normal': n_back, 'color': color})
+                    
+                    # Top (Y+): v3, v7, v6, v2. Normal (0,1,0)
+                    faces.append({'vertices': [v3, v7, v6, v2], 'normal': n_top, 'color': color})
+                    
+                    # Bottom (Y-): v0, v1, v5, v4. Normal (0,-1,0)
+                    faces.append({'vertices': [v0, v1, v5, v4], 'normal': n_bottom, 'color': color})
+                    
+                    # Right (X+): v1, v2, v6, v5. Normal (1,0,0)
+                    faces.append({'vertices': [v1, v2, v6, v5], 'normal': n_right, 'color': color})
+                    
+                    # Left (X-): v0, v4, v7, v3. Normal (-1,0,0)
+                    faces.append({'vertices': [v0, v4, v7, v3], 'normal': n_left, 'color': color})
+
+    return faces
+
+def optimize_faces(faces):
+    """
+    Removes duplicate faces.
+    Two faces are considered duplicates if they have the same vertices (in any order).
+    Since we are dealing with cubes, internal faces will appear twice (once for each cube sharing the face),
+    but with opposite normals. However, if we just check vertex positions, they are the same polygon geometry.
+    
+    Wait, if two cubes share a face, the vertices are the same.
+    Cube A (0,0,0) Right face: (1,0,0), (1,1,0), (1,1,1), (1,0,1)
+    Cube B (1,0,0) Left face: (1,0,0), (1,0,1), (1,1,1), (1,1,0)
+    
+    The vertices are the same set of points.
+    So we can sort the vertices of each face to create a key.
+    If a key appears more than once (it should be exactly twice for internal faces), we remove BOTH.
+    Because if it appears twice, it means it's an internal face between two opaque blocks.
+    """
+    face_groups = defaultdict(list)
+    
+    for face in faces:
+        # Create a key from sorted vertices
+        # Round to avoid float precision issues
+        verts = sorted([tuple(round(c, 5) for c in v) for v in face['vertices']])
+        key = tuple(verts)
+        face_groups[key].append(face)
+        
+    optimized_faces = []
+    removed_count = 0
+    
+    for key, group in face_groups.items():
+        if len(group) == 1:
+            optimized_faces.append(group[0])
+        else:
+            # If 2 or more, it's an internal face (or error), so we remove all instances
+            # For a perfect grid of cubes, internal faces always come in pairs.
+            removed_count += len(group)
+            
+    return optimized_faces, removed_count
+
+
 class VoxelWidget(QOpenGLWidget):
+    meshOptimized = pyqtSignal(int) # Signal emitting the number of removed polygons
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.layers_data = []
+        self.faces = [] # List of faces to render
+        self.optimization_enabled = False
+        
         self.rotation = QQuaternion.fromAxisAndAngle(QVector3D(1.0, 0.0, 0.0), 30.0) * \
                         QQuaternion.fromAxisAndAngle(QVector3D(0.0, 1.0, 0.0), -45.0)
         self.zoom = -50.0
@@ -314,6 +452,30 @@ class VoxelWidget(QOpenGLWidget):
 
     def set_layers(self, layers_data):
         self.layers_data = layers_data
+        self.update_mesh()
+
+    def set_optimization(self, enabled):
+        if self.optimization_enabled != enabled:
+            self.optimization_enabled = enabled
+            self.update_mesh()
+
+    def update_mesh(self):
+        if not self.layers_data:
+            self.faces = []
+            self.update()
+            return
+
+        # Generate full mesh
+        # Note: We generate with scale 1.0 here and apply scaling in paintGL via glScalef
+        # This keeps the logic simple and consistent with previous implementation
+        faces = generate_faces(self.layers_data)
+        
+        removed_count = 0
+        if self.optimization_enabled:
+            faces, removed_count = optimize_faces(faces)
+            
+        self.faces = faces
+        self.meshOptimized.emit(removed_count)
         self.update()
 
     def recalculate_zoom(self):
@@ -324,24 +486,11 @@ class VoxelWidget(QOpenGLWidget):
         num_layers = len(self.layers_data)
         
         # Calculate world dimensions
-        # Calculate world dimensions
-        # Swapped Y and Z:
-        # Width (X) -> X
-        # Height (Y_img) -> Z_world
-        # Layers (Z_stack) -> Y_world
         w_world = width * self.xy_scale
-        h_world = num_layers * self.z_scale # Height is now thickness
-        d_world = height * self.xy_scale    # Depth is now image height
+        h_world = num_layers * self.z_scale
+        d_world = height * self.xy_scale
         
-        # Calculate bounding sphere diameter (approx) or max dimension
         max_dim = max(w_world, h_world, d_world)
-        
-        # We want max_dim to occupy 80% of the view height
-        # tan(fov/2) = (height/2) / dist
-        # height_at_dist = 2 * dist * tan(22.5)
-        # We want max_dim = 0.8 * height_at_dist
-        # max_dim = 0.8 * 2 * dist * tan(22.5)
-        # dist = max_dim / (1.6 * tan(22.5))
         
         fov_rad = 45.0 * math.pi / 180.0
         tan_half_fov = math.tan(fov_rad / 2.0)
@@ -354,7 +503,6 @@ class VoxelWidget(QOpenGLWidget):
     def initializeGL(self):
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_CULL_FACE)
-        # Enable blending for transparency if needed, though cubes are solid
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glClearColor(0.2, 0.2, 0.2, 1.0)
@@ -367,108 +515,54 @@ class VoxelWidget(QOpenGLWidget):
         # Apply Quaternion Rotation
         axis = QVector3D()
         angle = 0.0
-        # getAxisAndAngle returns (axis, angle) in PyQt5
-        # Note: angle is in degrees
         axis, angle = self.rotation.getAxisAndAngle()
         glRotatef(angle, axis.x(), axis.y(), axis.z())
 
-        if not self.layers_data:
+        if not self.faces:
             return
 
         # Center the model
-        width, height = self.layers_data[0]['layer'].size
-        num_layers = len(self.layers_data)
-        
-        # Apply scaling FIRST
-        # Scale (X, Y, Z) -> (XY, Thickness, XY)
-        glScalef(self.xy_scale, self.z_scale, self.xy_scale)
-        
-        # Then translate to center
-        # Center (X, Y, Z) -> (width/2, layers/2, height/2)
-        glTranslatef(-width / 2.0, -num_layers / 2.0, -height / 2.0)
+        # We need dimensions. Since we have faces, we can infer, or just use layers_data info
+        if self.layers_data:
+            width, height = self.layers_data[0]['layer'].size
+            num_layers = len(self.layers_data)
+            
+            # Apply scaling FIRST
+            glScalef(self.xy_scale, self.z_scale, self.xy_scale)
+            
+            # Then translate to center
+            glTranslatef(-width / 2.0, -num_layers / 2.0, -height / 2.0)
 
         # Draw Solids
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-        self.render_voxels(draw_wireframe=False)
+        self.render_faces(draw_wireframe=False)
         
         # Draw Wireframe
-        # Offset slightly to avoid z-fighting
         glEnable(GL_POLYGON_OFFSET_LINE)
         glPolygonOffset(-1.0, -1.0)
         glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
         glLineWidth(1.5)
-        self.render_voxels(draw_wireframe=True)
+        self.render_faces(draw_wireframe=True)
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
         glDisable(GL_POLYGON_OFFSET_LINE)
 
-    def render_voxels(self, draw_wireframe=False):
-        for i, item in enumerate(self.layers_data):
-            layer = item['layer']
-            width, height = layer.size
-            data = layer.tobytes("raw", "RGBA")
+    def render_faces(self, draw_wireframe=False):
+        glBegin(GL_QUADS)
+        for face in self.faces:
+            if draw_wireframe:
+                glColor3f(0.0, 0.0, 0.0)
+            else:
+                r, g, b = face['color']
+                glColor3ub(r, g, b)
             
-            # Optimization: Use display lists if slow, but loop is fine for small images
-            glBegin(GL_QUADS)
-            for y in range(height):
-                for x in range(width):
-                    idx = (y * width + x) * 4
-                    r = data[idx]
-                    g = data[idx+1]
-                    b = data[idx+2]
-                    a = data[idx+3]
-                    
-                    if a > 0: # Visible pixel
-                        if draw_wireframe:
-                            # Black or Darker color for wireframe
-                            glColor3f(0.0, 0.0, 0.0)
-                        else:
-                            glColor3ub(r, g, b)
-                            
-                        # Draw cube at (x, layer, y_img)
-                        # x -> x
-                        # y (stack) -> i
-                        # z (depth) -> height - 1 - y
-                        self.draw_cube(x, i, height - 1 - y)
-            glEnd()
-
-    def draw_cube(self, x, y, z):
-        # Draw a unit cube at x, y, z
-        # Front Face
-        glNormal3f(0.0, 0.0, 1.0)
-        glVertex3f(x, y, z+1)
-        glVertex3f(x+1, y, z+1)
-        glVertex3f(x+1, y+1, z+1)
-        glVertex3f(x, y+1, z+1)
-        # Back Face
-        glNormal3f(0.0, 0.0, -1.0)
-        glVertex3f(x, y, z)
-        glVertex3f(x, y+1, z)
-        glVertex3f(x+1, y+1, z)
-        glVertex3f(x+1, y, z)
-        # Top Face
-        glNormal3f(0.0, 1.0, 0.0)
-        glVertex3f(x, y+1, z)
-        glVertex3f(x, y+1, z+1)
-        glVertex3f(x+1, y+1, z+1)
-        glVertex3f(x+1, y+1, z)
-        # Bottom Face
-        glNormal3f(0.0, -1.0, 0.0)
-        glVertex3f(x, y, z)
-        glVertex3f(x+1, y, z)
-        glVertex3f(x+1, y, z+1)
-        glVertex3f(x, y, z+1)
-        # Right face
-        glNormal3f(1.0, 0.0, 0.0)
-        glVertex3f(x+1, y, z)
-        glVertex3f(x+1, y+1, z)
-        glVertex3f(x+1, y+1, z+1)
-        glVertex3f(x+1, y, z+1)
-        # Left Face
-        glNormal3f(-1.0, 0.0, 0.0)
-        glVertex3f(x, y, z)
-        glVertex3f(x, y, z+1)
-        glVertex3f(x, y+1, z+1)
-        glVertex3f(x, y+1, z)
+            # Normal
+            nx, ny, nz = face['normal']
+            glNormal3f(nx, ny, nz)
+            
+            # Vertices
+            for v in face['vertices']:
+                glVertex3f(v[0], v[1], v[2])
+        glEnd()
 
     def resizeGL(self, width, height):
         side = min(width, height)
@@ -479,7 +573,7 @@ class VoxelWidget(QOpenGLWidget):
 
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
-        gluPerspective(45.0, width / height, 0.1, 5000.0) # Increased zFar
+        gluPerspective(45.0, width / height, 0.1, 5000.0)
         glMatrixMode(GL_MODELVIEW)
 
     def mousePressEvent(self, event):
@@ -490,33 +584,19 @@ class VoxelWidget(QOpenGLWidget):
         dy = event.y() - self.lastPos.y()
 
         if event.buttons() & Qt.LeftButton:
-            # Quaternion Rotation
-            # Drag X -> Rotate around Y axis
-            # Drag Y -> Rotate around X axis
-            # We want to rotate relative to the screen, so we apply rotation on the left
-            
-            # Sensitivity
             speed = 0.5
-            
-            # Create rotation for X movement (Yaw around Y axis)
             rot_y = QQuaternion.fromAxisAndAngle(QVector3D(0.0, 1.0, 0.0), dx * speed)
-            
-            # Create rotation for Y movement (Pitch around X axis)
             rot_x = QQuaternion.fromAxisAndAngle(QVector3D(1.0, 0.0, 0.0), dy * speed)
-            
-            # Apply rotations: new_rot = rot_x * rot_y * old_rot
             self.rotation = rot_x * rot_y * self.rotation
             self.rotation.normalize()
             
         elif event.buttons() & Qt.RightButton:
-            # Adjust zoom speed based on current zoom to make it controllable
             self.zoom += dy * (abs(self.zoom) * 0.01 + 0.1)
 
         self.lastPos = event.pos()
         self.update()
 
     def wheelEvent(self, event):
-        # Zoom with mouse wheel
         delta = event.angleDelta().y()
         if delta > 0:
             self.zoom *= 0.9
@@ -594,7 +674,11 @@ class MainWindow(QMainWindow):
         self.btn_process.clicked.connect(self.process_image)
         controls_layout.addWidget(self.btn_process)
         
-
+        # Optimization Checkbox
+        self.chk_optimization = QCheckBox("Optimization")
+        self.chk_optimization.setChecked(False)
+        self.chk_optimization.stateChanged.connect(self.on_optimization_changed)
+        controls_layout.addWidget(self.chk_optimization)
 
         self.btn_export_obj = QPushButton("Export Mesh")
         self.btn_export_obj.clicked.connect(self.export_obj)
@@ -604,14 +688,17 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(controls_layout)
 
         # Image Display Area (Splitter or just VBox)
-        # Top: Original / Converted
+        # Top: Original / Stats (Removed converted image view)
         top_display_layout = QHBoxLayout()
         
         self.lbl_original = ImageLabel()
         top_display_layout.addWidget(self.lbl_original, 1)
         
-        self.lbl_converted = ImageLabel()
-        top_display_layout.addWidget(self.lbl_converted, 1)
+        # Stats Label where converted image was
+        self.lbl_stats = QLabel("Polygones enlevés: 0")
+        self.lbl_stats.setAlignment(Qt.AlignCenter)
+        self.lbl_stats.setStyleSheet("font-size: 16px; font-weight: bold; color: #333; border: 1px solid #ccc; background-color: #eee;")
+        top_display_layout.addWidget(self.lbl_stats, 1)
         
         main_layout.addLayout(top_display_layout, 1)
 
@@ -633,6 +720,8 @@ class MainWindow(QMainWindow):
 
         # Right: 3D Voxel View
         self.voxel_widget = VoxelWidget()
+        self.voxel_widget.meshOptimized.connect(self.update_stats) # Connect signal
+        
         voxel_container = QWidget()
         voxel_layout = QVBoxLayout(voxel_container)
         lbl_voxel = QLabel("Vue 3D Voxel:")
@@ -653,11 +742,11 @@ class MainWindow(QMainWindow):
             self.current_image_path = path
             img = Image.open(path)
             self.lbl_original.set_image(img)
-            self.lbl_converted.clear()
             self.clear_layers_grid()
 
             self.btn_export_obj.setEnabled(False)
             self.voxel_widget.set_layers([])
+            self.lbl_stats.setText("Polygones enlevés: 0")
 
             # Update color count based on image
             # Try to count unique colors up to 256
@@ -675,8 +764,6 @@ class MainWindow(QMainWindow):
         palette_img = load_and_convert_to_palette(self.current_image_path, num_colors)
         
         if palette_img:
-            self.lbl_converted.set_image(palette_img)
-            
             # Get current order if exists
             custom_order = []
             if self.layers_list.count() > 0:
@@ -689,6 +776,10 @@ class MainWindow(QMainWindow):
             # Generate layers
             self.processed_layers = generate_palette_layers(palette_img, custom_order)
             self.display_layers()
+            
+            # Update Voxel Widget
+            # Ensure optimization state is set
+            self.voxel_widget.optimization_enabled = self.chk_optimization.isChecked()
             self.voxel_widget.set_layers(self.processed_layers)
             self.update_depth(self.spin_depth.value())
             
@@ -710,6 +801,23 @@ class MainWindow(QMainWindow):
                 self.voxel_widget.recalculate_zoom() # Auto-zoom after processing
 
             self.btn_export_obj.setEnabled(True)
+
+    def on_optimization_changed(self, state):
+        self.voxel_widget.set_optimization(state == Qt.Checked)
+
+    def update_stats(self, removed_count):
+        self.lbl_stats.setText(f"Polygones enlevés: {removed_count}")
+
+    def export_obj(self):
+        if not self.voxel_widget.faces:
+            return
+            
+        path, _ = QFileDialog.getSaveFileName(self, "Sauvegarder OBJ", "", "OBJ Files (*.obj)")
+        if path:
+            # Use the faces from the voxel widget (which are already optimized if enabled)
+            save_to_obj(self.voxel_widget.faces, path, 
+                       z_scale=self.voxel_widget.z_scale, 
+                       xy_scale=self.voxel_widget.xy_scale)
 
     def block_signals_dimensions(self, block):
         self.spin_scale_xy.blockSignals(block)
@@ -798,42 +906,27 @@ class MainWindow(QMainWindow):
             
             # Color Swatch
             r, g, b = item['color']
-            swatch = QLabel()
-            swatch.setFixedSize(30, 30)
-            swatch.setStyleSheet(f"background-color: rgb({r},{g},{b}); border: 1px solid black;")
-            layout.addWidget(swatch)
             
-            # Layer Image
-            layer_lbl = ImageLabel()
-            layer_lbl.setFixedSize(40, 40)
-            layer_lbl.set_image(item['layer'])
-            layout.addWidget(layer_lbl)
+            # Create a small pixmap for color
+            pix = QPixmap(20, 20)
+            pix.fill(QColor(r, g, b))
+            lbl_color = QLabel()
+            lbl_color.setPixmap(pix)
+            layout.addWidget(lbl_color)
             
-            # Mask Image
-            mask_lbl = ImageLabel()
-            mask_lbl.setFixedSize(40, 40)
-            mask_lbl.set_image(item['mask'])
-            layout.addWidget(mask_lbl)
+            # Info
+            layout.addWidget(QLabel(f"RGB: {r},{g},{b}"))
             
             layout.addStretch()
             
-            # List Item
+            # Create List Item
             list_item = QListWidgetItem(self.layers_list)
             list_item.setSizeHint(widget.sizeHint())
+            
+            # Store data
             list_item.setData(Qt.UserRole, item)
             
             self.layers_list.setItemWidget(list_item, widget)
-
-    def export_obj(self):
-        if self.processed_layers:
-            # Default path: ./meshes/output.obj
-            default_dir = os.path.join(os.getcwd(), "meshes")
-            if not os.path.exists(default_dir):
-                os.makedirs(default_dir)
-            
-            path, _ = QFileDialog.getSaveFileName(self, "Exporter OBJ", os.path.join(default_dir, "output.obj"), "OBJ Files (*.obj)")
-            if path:
-                save_to_obj(self.processed_layers, path, self.spin_depth.value(), self.spin_scale_xy.value())
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
