@@ -778,14 +778,14 @@ class MainWindow(QMainWindow):
         self.spin_width_cm.setSingleStep(1.0)
         self.spin_width_cm.setValue(10.0)
         self.spin_width_cm.valueChanged.connect(self.update_from_width_cm)
-        add_param("Largeur (cm):", self.spin_width_cm)
+        add_param("Largeur (m):", self.spin_width_cm)
 
         self.spin_height_cm = QDoubleSpinBox()
         self.spin_height_cm.setRange(0.1, 1000.0)
         self.spin_height_cm.setSingleStep(1.0)
         self.spin_height_cm.setValue(10.0)
         self.spin_height_cm.valueChanged.connect(self.update_from_height_cm)
-        add_param("Hauteur (cm):", self.spin_height_cm)
+        add_param("Hauteur (m):", self.spin_height_cm)
 
         self.btn_process = QPushButton("Convertir & Extraire")
         self.btn_process.clicked.connect(self.process_image)
