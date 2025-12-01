@@ -4,7 +4,7 @@ import os
 from collections import defaultdict
 
 CENTIMETRE_FACTOR = 1000.0
-EPAISSEUR_FACTEUR = 10.0
+THICKNESS_FACTOR = 10.0
 
 
 # Check for PyQt5
@@ -12,7 +12,7 @@ try:
     from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                  QHBoxLayout, QPushButton, QLabel, QFileDialog, 
                                  QSpinBox, QScrollArea, QGridLayout, QFrame,
-                                 QListWidget, QListWidgetItem, QAbstractItemView, QCheckBox)
+                                 QListWidget, QListWidgetItem, QAbstractItemView, QCheckBox, QDoubleSpinBox)
     from PyQt5.QtGui import QPixmap, QImage, QColor
     from PyQt5.QtCore import Qt, QSize, pyqtSignal
     import math
@@ -101,7 +101,9 @@ def generate_palette_layers(palette_image, custom_order=None):
             'index': index,
             'color': (r, g, b),
             'layer': layer,
-            'mask': cumulative_mask.copy() # Copie car on va le modifier
+            'layer': layer,
+            'mask': cumulative_mask.copy(), # Copie car on va le modifier
+            'thickness': 0.1 # Default thickness
         })
         
         # Mettre à jour le masque cumulatif pour la prochaine itération
@@ -127,7 +129,7 @@ def save_layers_to_disk(layers_data, output_dir="sub_images"):
         layer.save(filepath)
         print(f"Sauvegardé: {filepath}")
 
-def save_to_obj(faces, output_path, z_scale=1.0, xy_scale=1.0, optimize_vertices=False):
+def save_to_obj(faces, output_path, xy_scale=1.0, optimize_vertices=False):
     """
     Exports faces to an OBJ file with an associated MTL file for colors.
     If optimize_vertices is True, merges vertices at the same position (tolerance 0.0001).
@@ -244,7 +246,7 @@ def save_to_obj(faces, output_path, z_scale=1.0, xy_scale=1.0, optimize_vertices
                 face_v_indices = []
                 for v in face['vertices']:
                     vx = v[0] * xy_scale
-                    vy = v[1] * z_scale
+                    vy = v[1]
                     vz = v[2] * xy_scale
                     
                     # Round for uniqueness check
@@ -294,7 +296,7 @@ def save_to_obj(faces, output_path, z_scale=1.0, xy_scale=1.0, optimize_vertices
                 face_indices = []
                 for v in face['vertices']:
                     vx = v[0] * xy_scale
-                    vy = v[1] * z_scale
+                    vy = v[1]
                     vz = v[2] * xy_scale
                     
                     key = (round(vx, 4), round(vy, 4), round(vz, 4))
@@ -333,7 +335,7 @@ def save_to_obj(faces, output_path, z_scale=1.0, xy_scale=1.0, optimize_vertices
                 # Vertices
                 for v in face['vertices']:
                     vx = v[0] * xy_scale
-                    vy = v[1] * z_scale
+                    vy = v[1]
                     vz = v[2] * xy_scale
                     obj_file.write(f"v {vx:.6f} {vy:.6f} {vz:.6f}\n")
                     
@@ -394,7 +396,7 @@ from OpenGL.GLU import *
 from PyQt5.QtWidgets import QOpenGLWidget
 from PyQt5.QtGui import QQuaternion, QVector3D
 
-def generate_faces(layers_data, xy_scale=1.0, z_scale=1.0):
+def generate_faces(layers_data):
     """
     Generates a list of faces for the voxel model.
     Each face is a dict: {'vertices': [(x,y,z), ...], 'normal': (nx,ny,nz), 'color': (r,g,b)}
@@ -427,7 +429,16 @@ def generate_faces(layers_data, xy_scale=1.0, z_scale=1.0):
         # X is Right.
         # Z is Depth (image Y).
         
-        y_stack = float(i)
+        # Y is UP (stack).
+        # X is Right.
+        # Z is Depth (image Y).
+        
+        # Calculate Y range for this layer
+        y_start = 0.0
+        for k in range(i):
+            y_start += layers_data[k]['thickness'] * THICKNESS_FACTOR
+            
+        y_end = y_start + item['thickness'] * THICKNESS_FACTOR
         
         for y_img in range(height):
             for x_img in range(width):
@@ -442,27 +453,29 @@ def generate_faces(layers_data, xy_scale=1.0, z_scale=1.0):
                     # z = height - 1 - y_img
                     
                     x = float(x_img)
-                    y = y_stack
+                    x = float(x_img)
+                    y_bottom = y_start
+                    y_top = y_end
                     z = float(height - 1 - y_img)
                     
                     # Vertices for the unit cube at (x, y, z)
-                    # v0: x, y, z
-                    # v1: x+1, y, z
-                    # v2: x+1, y+1, z
-                    # v3: x, y+1, z
-                    # v4: x, y, z+1
-                    # v5: x+1, y, z+1
-                    # v6: x+1, y+1, z+1
-                    # v7: x, y+1, z+1
+                    # v0: x, y_bottom, z
+                    # v1: x+1, y_bottom, z
+                    # v2: x+1, y_top, z
+                    # v3: x, y_top, z
+                    # v4: x, y_bottom, z+1
+                    # v5: x+1, y_bottom, z+1
+                    # v6: x+1, y_top, z+1
+                    # v7: x, y_top, z+1
                     
-                    v0 = (x, y, z)
-                    v1 = (x+1, y, z)
-                    v2 = (x+1, y+1, z)
-                    v3 = (x, y+1, z)
-                    v4 = (x, y, z+1)
-                    v5 = (x+1, y, z+1)
-                    v6 = (x+1, y+1, z+1)
-                    v7 = (x, y+1, z+1)
+                    v0 = (x, y_bottom, z)
+                    v1 = (x+1, y_bottom, z)
+                    v2 = (x+1, y_top, z)
+                    v3 = (x, y_top, z)
+                    v4 = (x, y_bottom, z+1)
+                    v5 = (x+1, y_bottom, z+1)
+                    v6 = (x+1, y_top, z+1)
+                    v7 = (x, y_top, z+1)
                     
                     # Add faces
                     # Front (Z+): v4, v5, v6, v7. Normal (0,0,1)
@@ -537,7 +550,7 @@ class VoxelWidget(QOpenGLWidget):
         self.rotation = QQuaternion.fromAxisAndAngle(QVector3D(1.0, 0.0, 0.0), 30.0) * \
                         QQuaternion.fromAxisAndAngle(QVector3D(0.0, 1.0, 0.0), -45.0)
         self.zoom = -50.0
-        self.z_scale = 1.0
+        # self.z_scale = 1.0 # Removed
         self.xy_scale = 1.0
         self.lastPos = None
 
@@ -604,7 +617,10 @@ class VoxelWidget(QOpenGLWidget):
         
         # Calculate world dimensions
         w_world = width * self.xy_scale
-        h_world = num_layers * self.z_scale
+        
+        total_thickness = sum(l['thickness'] * THICKNESS_FACTOR for l in self.layers_data)
+        h_world = total_thickness # Y is not scaled by xy_scale in our new logic, it is absolute
+        
         d_world = height * self.xy_scale
         
         max_dim = max(w_world, h_world, d_world)
@@ -645,10 +661,12 @@ class VoxelWidget(QOpenGLWidget):
             num_layers = len(self.layers_data)
             
             # Apply scaling FIRST
-            glScalef(self.xy_scale, self.z_scale, self.xy_scale)
+            # Scale X and Z by xy_scale. Y is not scaled (thickness is absolute/already handled)
+            glScalef(self.xy_scale, 1.0, self.xy_scale)
             
             # Then translate to center
-            glTranslatef(-width / 2.0, -num_layers / 2.0, -height / 2.0)
+            total_thickness = sum(l['thickness'] * THICKNESS_FACTOR for l in self.layers_data)
+            glTranslatef(-width / 2.0, -total_thickness / 2.0, -height / 2.0)
 
         # Draw Solids
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
@@ -757,13 +775,12 @@ class MainWindow(QMainWindow):
         self.spin_colors.setValue(4) # Default to 4 as requested
         add_param("Nb Couleurs:", self.spin_colors)
 
-        from PyQt5.QtWidgets import QDoubleSpinBox
-        self.spin_depth = QDoubleSpinBox()
-        self.spin_depth.setRange(0.01, 5.0)
-        self.spin_depth.setSingleStep(0.01)
-        self.spin_depth.setValue(0.1) # Default to 0.1 fixed thickness
-        self.spin_depth.valueChanged.connect(self.update_depth)
-        add_param("Epaisseur Couche (cm):", self.spin_depth)
+        # self.spin_depth = QDoubleSpinBox()
+        # self.spin_depth.setRange(0.01, 5.0)
+        # self.spin_depth.setSingleStep(0.01)
+        # self.spin_depth.setValue(0.1) # Default to 0.1 fixed thickness
+        # self.spin_depth.valueChanged.connect(self.update_depth)
+        # add_param("Epaisseur Couche (cm):", self.spin_depth)
 
         self.spin_scale_xy = QDoubleSpinBox()
         self.spin_scale_xy.setRange(0.001, 10000.0)
@@ -912,7 +929,7 @@ class MainWindow(QMainWindow):
             # Ensure optimization state is set
             self.voxel_widget.optimization_enabled = self.chk_optimization.isChecked()
             self.update_voxel_layers()
-            self.update_depth(self.spin_depth.value())
+            # self.update_depth(self.spin_depth.value()) # Removed
             
             # Initialize dimensions based on image size and default xy_scale
             if self.processed_layers:
@@ -948,7 +965,6 @@ class MainWindow(QMainWindow):
         if path:
             # Use the faces from the voxel widget (which are already optimized if enabled)
             save_to_obj(self.voxel_widget.faces, path, 
-                       z_scale=self.voxel_widget.z_scale, 
                        xy_scale=self.voxel_widget.xy_scale,
                        optimize_vertices=self.chk_optimization.isChecked())
 
@@ -957,9 +973,9 @@ class MainWindow(QMainWindow):
         self.spin_width_cm.blockSignals(block)
         self.spin_height_cm.blockSignals(block)
 
-    def update_depth(self, value):
-        self.voxel_widget.z_scale = value * EPAISSEUR_FACTEUR
-        self.voxel_widget.update()
+    # def update_depth(self, value):
+    #     self.voxel_widget.z_scale = value * EPAISSEUR_FACTEUR
+    #     self.voxel_widget.update()
 
     def update_voxel_scale_xy(self):
         self.voxel_widget.xy_scale = self.spin_scale_xy.value()
@@ -1065,6 +1081,16 @@ class MainWindow(QMainWindow):
             # Info
             layout.addWidget(QLabel(f"RGB: {r},{g},{b}"))
             
+            # Thickness Control
+            layout.addWidget(QLabel("Ep:"))
+            spin_thick = QDoubleSpinBox()
+            spin_thick.setRange(0.01, 10.0)
+            spin_thick.setSingleStep(0.01)
+            spin_thick.setValue(item.get('thickness', 0.1))
+            spin_thick.setFixedWidth(60)
+            spin_thick.valueChanged.connect(lambda val, idx=i: self.on_layer_thickness_changed(idx, val))
+            layout.addWidget(spin_thick)
+            
             layout.addStretch()
             
             # Create List Item
@@ -1081,6 +1107,11 @@ class MainWindow(QMainWindow):
         # Note: list_index corresponds to the index in processed_layers because display_layers iterates it
         if 0 <= list_index < len(self.processed_layers):
             self.processed_layers[list_index]['enabled'] = (state == Qt.Checked)
+            self.update_voxel_layers()
+
+    def on_layer_thickness_changed(self, list_index, value):
+        if 0 <= list_index < len(self.processed_layers):
+            self.processed_layers[list_index]['thickness'] = value
             self.update_voxel_layers()
 
 if __name__ == "__main__":
